@@ -87,14 +87,23 @@ def plot_spectra(
                 f"{label} and {reference_label} must have identical energy bounds"
             )
 
-    bounds = _plot_energy_bounds(physical_bounds)
+    plotting_bounds = _plot_energy_bounds(physical_bounds)
 
-    # Geometric group centers are appropriate marker locations on the common
-    # logarithmic energy axis; stairs() still shows the group-integrated bins.
-    centers = np.sqrt(bounds[:-1] * bounds[1:])
+    # Widths and midpoint energies are physical quantities. They must use the
+    # true boundaries even when a zero edge is shifted for log-axis display.
+    energy_widths = np.diff(physical_bounds)
+    energy_midpoints = physical_bounds[:-1] + 0.5 * energy_widths
     normalized = {
         label: spectrum.normalized
         for label, spectrum in included.items()
+    }
+    energy_spectra = {
+        label: values / energy_widths
+        for label, values in normalized.items()
+    }
+    lethargy_spectra = {
+        label: energy_midpoints * values
+        for label, values in energy_spectra.items()
     }
     styles = {
         "OpenMC": ("C0", "o"),
@@ -102,15 +111,25 @@ def plot_spectra(
         "Direct": ("C2", "^"),
     }
 
+    energy_sigma = lethargy_sigma = None
+    if "OpenMC" in included and included["OpenMC"].std_dev is not None:
+        # Normalize sigma by the same scalar flux sum as the mean. This ignores
+        # covariance between groups, so both bands are diagnostics rather than
+        # propagated uncertainty on the normalized distributions.
+        openmc_result = included["OpenMC"]
+        normalized_sigma = openmc_result.std_dev / np.sum(openmc_result.values)
+        energy_sigma = normalized_sigma / energy_widths
+        lethargy_sigma = energy_midpoints * energy_sigma
+
     figures = {}
 
-    # --- Normalized group-integrated spectrum ----------------------------
+    # --- Normalized flux spectrum per unit energy ------------------------
     figure, axis = plt.subplots()
-    for label, values in normalized.items():
+    for label, values in energy_spectra.items():
         color, marker = styles[label]
-        axis.stairs(values, bounds, color=color, label=label)
+        axis.stairs(values, plotting_bounds, color=color, label=label)
         axis.plot(
-            centers,
+            energy_midpoints,
             values,
             color=color,
             marker=marker,
@@ -118,17 +137,12 @@ def plot_spectra(
             label="_nolegend_",
         )
 
-    if "OpenMC" in included and included["OpenMC"].std_dev is not None:
-        # Normalize sigma by the same scalar flux sum as the mean. This ignores
-        # covariance between groups, so the band is a diagnostic rather than a
-        # propagated uncertainty on the normalized distribution.
-        openmc_result = included["OpenMC"]
-        normalized_sigma = openmc_result.std_dev / np.sum(openmc_result.values)
-        lower = normalized["OpenMC"] - normalized_sigma
-        upper = normalized["OpenMC"] + normalized_sigma
+    if energy_sigma is not None:
+        lower = energy_spectra["OpenMC"] - energy_sigma
+        upper = energy_spectra["OpenMC"] + energy_sigma
         axis.stairs(
             upper,
-            bounds,
+            plotting_bounds,
             baseline=lower,
             fill=True,
             color=styles["OpenMC"][0],
@@ -137,37 +151,51 @@ def plot_spectra(
         )
 
     axis.set_xscale("log")
+    axis.set_yscale("log")
     axis.set_xlabel("Energy [eV]")
-    axis.set_ylabel("Normalized group-integrated flux")
+    axis.set_ylabel("Normalized flux spectrum [1/eV]")
     axis.legend()
     figure.tight_layout()
-    figures["group_spectrum"] = figure
+    figures["flux_spectrum"] = figure
 
-    # --- Spectrum per unit lethargy --------------------------------------
-    lethargy_width = np.log(bounds[1:] / bounds[:-1])
+    # --- Midpoint representation of normalized E * phi(E) ---------------
     figure, axis = plt.subplots()
-    for label, values in normalized.items():
-        per_lethargy = values / lethargy_width
+    for label, values in lethargy_spectra.items():
         color, marker = styles[label]
-        axis.stairs(per_lethargy, bounds, color=color, label=label)
+        axis.stairs(values, plotting_bounds, color=color, label=label)
         axis.plot(
-            centers,
-            per_lethargy,
+            energy_midpoints,
+            values,
             color=color,
             marker=marker,
             linestyle="none",
             label="_nolegend_",
         )
 
+    if lethargy_sigma is not None:
+        lower = lethargy_spectra["OpenMC"] - lethargy_sigma
+        upper = lethargy_spectra["OpenMC"] + lethargy_sigma
+        axis.stairs(
+            upper,
+            plotting_bounds,
+            baseline=lower,
+            fill=True,
+            color=styles["OpenMC"][0],
+            alpha=0.2,
+            label="OpenMC ±1σ (covariance ignored)",
+        )
+
     axis.set_xscale("log")
-    axis.set_yscale("log")
+    axis.set_yscale("linear")
     axis.set_xlabel("Energy [eV]")
     axis.set_ylabel("Normalized flux per unit lethargy")
     axis.legend()
     figure.tight_layout()
-    figures["flux_per_lethargy"] = figure
+    figures["lethargy_spectrum"] = figure
 
     # --- Relative differences from the direct balance solution -----------
+    # The common group width cancels when two per-energy spectra are compared
+    # group by group, so normalized integrated values give the same ratio.
     comparison_labels = [label for label in normalized if label != "Direct"]
     if "Direct" in normalized and comparison_labels:
         direct_values = normalized["Direct"]
@@ -180,12 +208,12 @@ def plot_spectra(
             color, marker = styles[label]
             axis.stairs(
                 difference,
-                bounds,
+                plotting_bounds,
                 color=color,
                 label=f"{label} vs Direct",
             )
             axis.plot(
-                centers,
+                energy_midpoints,
                 difference,
                 color=color,
                 marker=marker,
