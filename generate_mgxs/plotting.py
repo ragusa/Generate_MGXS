@@ -46,6 +46,8 @@ def plot_spectra(
 ):
     """Plot selected OpenMC/OpenSn/direct spectrum comparisons."""
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     solver_results = {
         "openmc": ("OpenMC", openmc),
@@ -110,6 +112,7 @@ def plot_spectra(
         "OpenSn": ("C1", "s"),
         "Direct": ("C2", "^"),
     }
+    marker_stride = max(1, energy_widths.size // 20)
 
     energy_sigma = lethargy_sigma = None
     if "OpenMC" in included and included["OpenMC"].std_dev is not None:
@@ -125,71 +128,131 @@ def plot_spectra(
 
     # --- Normalized flux spectrum per unit energy ------------------------
     figure, axis = plt.subplots()
+    legend_handles = []
     for label, values in energy_spectra.items():
         color, marker = styles[label]
-        axis.stairs(values, plotting_bounds, color=color, label=label)
+        values_plot = np.insert(values, 0, values[0])
+        axis.loglog(
+            plotting_bounds,
+            values_plot,
+            color=color,
+            drawstyle="steps",
+            label=label,
+        )
         axis.plot(
             energy_midpoints,
             values,
             color=color,
             marker=marker,
+            markevery=marker_stride,
+            markersize=3.25,
             linestyle="none",
             label="_nolegend_",
+        )
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                marker=marker,
+                markersize=3.25,
+                label=label,
+            )
         )
 
     if energy_sigma is not None:
         lower = energy_spectra["OpenMC"] - energy_sigma
         upper = energy_spectra["OpenMC"] + energy_sigma
-        axis.stairs(
-            upper,
+        lower_plot = np.insert(lower, 0, lower[0])
+        upper_plot = np.insert(upper, 0, upper[0])
+        axis.fill_between(
             plotting_bounds,
-            baseline=lower,
-            fill=True,
+            lower_plot,
+            upper_plot,
+            step="pre",
             color=styles["OpenMC"][0],
             alpha=0.2,
             label="OpenMC ±1σ (covariance ignored)",
+        )
+        legend_handles.append(
+            Patch(
+                facecolor=styles["OpenMC"][0],
+                alpha=0.2,
+                label="OpenMC ±1σ (covariance ignored)",
+            )
         )
 
     axis.set_xscale("log")
     axis.set_yscale("log")
     axis.set_xlabel("Energy [eV]")
     axis.set_ylabel("Normalized flux spectrum [1/eV]")
-    axis.legend()
+    axis.grid(True, which="both", alpha=0.3)
+    axis.legend(handles=legend_handles)
     figure.tight_layout()
     figures["flux_spectrum"] = figure
 
     # --- Midpoint representation of normalized E * phi(E) ---------------
     figure, axis = plt.subplots()
+    legend_handles = []
     for label, values in lethargy_spectra.items():
         color, marker = styles[label]
-        axis.stairs(values, plotting_bounds, color=color, label=label)
+        values_plot = np.insert(values, 0, values[0])
+        axis.semilogx(
+            plotting_bounds,
+            values_plot,
+            color=color,
+            drawstyle="steps",
+            label=label,
+        )
         axis.plot(
             energy_midpoints,
             values,
             color=color,
             marker=marker,
+            markevery=marker_stride,
+            markersize=3.25,
             linestyle="none",
             label="_nolegend_",
+        )
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                marker=marker,
+                markersize=3.25,
+                label=label,
+            )
         )
 
     if lethargy_sigma is not None:
         lower = lethargy_spectra["OpenMC"] - lethargy_sigma
         upper = lethargy_spectra["OpenMC"] + lethargy_sigma
-        axis.stairs(
-            upper,
+        lower_plot = np.insert(lower, 0, lower[0])
+        upper_plot = np.insert(upper, 0, upper[0])
+        axis.fill_between(
             plotting_bounds,
-            baseline=lower,
-            fill=True,
+            lower_plot,
+            upper_plot,
+            step="pre",
             color=styles["OpenMC"][0],
             alpha=0.2,
             label="OpenMC ±1σ (covariance ignored)",
+        )
+        legend_handles.append(
+            Patch(
+                facecolor=styles["OpenMC"][0],
+                alpha=0.2,
+                label="OpenMC ±1σ (covariance ignored)",
+            )
         )
 
     axis.set_xscale("log")
     axis.set_yscale("linear")
     axis.set_xlabel("Energy [eV]")
     axis.set_ylabel("Normalized flux per unit lethargy")
-    axis.legend()
+    axis.grid(True, which="both", alpha=0.3)
+    axis.legend(handles=legend_handles)
     figure.tight_layout()
     figures["lethargy_spectrum"] = figure
 

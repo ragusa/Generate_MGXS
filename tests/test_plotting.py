@@ -53,6 +53,30 @@ def comparison_spectra():
     return openmc, opensn, direct
 
 
+def labelled_line(axis, label):
+    """Return one primary solver curve, excluding marker-only overlays."""
+    return next(line for line in axis.lines if line.get_label() == label)
+
+
+def assert_stepwise_band(axis, lower, upper):
+    """Check the y levels represented by a stepwise uncertainty collection."""
+    band = next(
+        collection
+        for collection in axis.collections
+        if collection.get_label() == "OpenMC ±1σ (covariance ignored)"
+    )
+    actual_levels = np.unique(band.get_paths()[0].vertices[:, 1])
+    expected_levels = np.unique(
+        np.concatenate(
+            (
+                np.insert(lower, 0, lower[0]),
+                np.insert(upper, 0, upper[0]),
+            )
+        )
+    )
+    np.testing.assert_allclose(actual_levels, expected_levels)
+
+
 def test_plot_spectra_writes_three_diagnostics_with_solver_markers_and_uncertainty(
     tmp_path,
 ):
@@ -77,43 +101,40 @@ def test_plot_spectra_writes_three_diagnostics_with_solver_markers_and_uncertain
     }
 
     energy_axis = figures["flux_spectrum"].axes[0]
-    assert [line.get_marker() for line in energy_axis.lines] == ["o", "s", "^"]
+    marker_lines = [line for line in energy_axis.lines if line.get_label() == "_nolegend_"]
+    assert [line.get_marker() for line in marker_lines] == ["o", "s", "^"]
     assert energy_axis.get_xscale() == energy_axis.get_yscale() == "log"
+    energy_legend = energy_axis.get_legend()
+    assert [handle.get_marker() for handle in energy_legend.legend_handles[:3]] == [
+        "o",
+        "s",
+        "^",
+    ]
 
-    energy_band = next(
-        patch
-        for patch in energy_axis.patches
-        if patch.get_label() == "OpenMC ±1σ (covariance ignored)"
-    )
     widths = np.diff(openmc.energy_bounds_ev)
     midpoints = openmc.energy_bounds_ev[:-1] + 0.5 * widths
     normalized_sigma = openmc.std_dev / np.sum(openmc.values)
     energy_sigma = normalized_sigma / widths
     energy_values = openmc.normalized / widths
-    np.testing.assert_allclose(
-        energy_band.get_data().values,
-        energy_values + energy_sigma,
-    )
-    np.testing.assert_allclose(
-        energy_band.get_data().baseline,
+    assert_stepwise_band(
+        energy_axis,
         energy_values - energy_sigma,
+        energy_values + energy_sigma,
     )
 
     lethargy_axis = figures["lethargy_spectrum"].axes[0]
-    lethargy_band = next(
-        patch
-        for patch in lethargy_axis.patches
-        if patch.get_label() == "OpenMC ±1σ (covariance ignored)"
-    )
+    lethargy_legend = lethargy_axis.get_legend()
+    assert [handle.get_marker() for handle in lethargy_legend.legend_handles[:3]] == [
+        "o",
+        "s",
+        "^",
+    ]
     lethargy_values = midpoints * energy_values
     lethargy_sigma = midpoints * energy_sigma
-    np.testing.assert_allclose(
-        lethargy_band.get_data().values,
-        lethargy_values + lethargy_sigma,
-    )
-    np.testing.assert_allclose(
-        lethargy_band.get_data().baseline,
+    assert_stepwise_band(
+        lethargy_axis,
         lethargy_values - lethargy_sigma,
+        lethargy_values + lethargy_sigma,
     )
 
     plt.close("all")
@@ -135,25 +156,37 @@ def test_plot_spectra_energy_lethargy_and_relative_difference_definitions():
     ):
         normalized = spectrum.normalized
         energy_values = normalized / widths
-        energy_patch = next(
-            item for item in energy_axis.patches if item.get_label() == label
-        )
-        lethargy_patch = next(
-            item for item in lethargy_axis.patches if item.get_label() == label
+        energy_line = labelled_line(energy_axis, label)
+        lethargy_line = labelled_line(lethargy_axis, label)
+        expected_energy_plot = np.insert(energy_values, 0, energy_values[0])
+        expected_lethargy = midpoints * energy_values
+        expected_lethargy_plot = np.insert(
+            expected_lethargy,
+            0,
+            expected_lethargy[0],
         )
 
         assert np.sum(normalized) == pytest.approx(1.0)
-        np.testing.assert_allclose(energy_patch.get_data().values, energy_values)
+        np.testing.assert_array_equal(energy_line.get_xdata(), direct.energy_bounds_ev)
+        np.testing.assert_allclose(energy_line.get_ydata(), expected_energy_plot)
+        assert energy_line.get_ydata()[0] == energy_line.get_ydata()[1]
+        assert energy_line.get_drawstyle() == "steps"
         assert np.sum(energy_values * widths) == pytest.approx(1.0)
+        np.testing.assert_array_equal(lethargy_line.get_xdata(), direct.energy_bounds_ev)
         np.testing.assert_allclose(
-            lethargy_patch.get_data().values,
-            midpoints * energy_values,
+            lethargy_line.get_ydata(),
+            expected_lethargy_plot,
         )
+        assert lethargy_line.get_ydata()[0] == lethargy_line.get_ydata()[1]
+        assert lethargy_line.get_drawstyle() == "steps"
 
     assert energy_axis.get_xscale() == energy_axis.get_yscale() == "log"
     assert lethargy_axis.get_xscale() == "log"
     assert lethargy_axis.get_yscale() == "linear"
-    assert [line.get_marker() for line in lethargy_axis.lines] == ["o", "s", "^"]
+    marker_lines = [
+        line for line in lethargy_axis.lines if line.get_label() == "_nolegend_"
+    ]
+    assert [line.get_marker() for line in marker_lines] == ["o", "s", "^"]
 
     relative_axis = figures["relative_differences"].axes[0]
     direct_values = direct.normalized
@@ -197,8 +230,9 @@ def test_plot_spectra_accepts_openmc_and_direct_without_opensn():
         "relative_differences",
     }
     group_labels = {
-        patch.get_label()
-        for patch in figures["flux_spectrum"].axes[0].patches
+        line.get_label()
+        for line in figures["flux_spectrum"].axes[0].lines
+        if line.get_label() != "_nolegend_"
     }
     assert "OpenMC" in group_labels
     assert "Direct" in group_labels
@@ -223,8 +257,9 @@ def test_plot_spectra_accepts_opensn_and_direct_without_openmc():
     )
 
     group_labels = {
-        patch.get_label()
-        for patch in figures["flux_spectrum"].axes[0].patches
+        line.get_label()
+        for line in figures["flux_spectrum"].axes[0].lines
+        if line.get_label() != "_nolegend_"
     }
     assert group_labels == {"OpenSn", "Direct"}
     relative_labels = {
@@ -248,8 +283,9 @@ def test_plot_spectra_accepts_openmc_only():
 
     assert set(figures) == {"flux_spectrum", "lethargy_spectrum"}
     group_labels = {
-        patch.get_label()
-        for patch in figures["flux_spectrum"].axes[0].patches
+        line.get_label()
+        for line in figures["flux_spectrum"].axes[0].lines
+        if line.get_label() != "_nolegend_"
     }
     assert "OpenMC" in group_labels
     assert "OpenSn" not in group_labels
@@ -270,6 +306,34 @@ def test_plot_spectra_rejects_requested_missing_result():
         )
 
 
+def test_fine_group_spectrum_markers_are_thinned_deterministically():
+    groups = 361
+    bounds = np.geomspace(1.0e-5, 1.0e7, groups + 1)
+    values = np.linspace(1.0, 2.0, groups)
+    openmc = Spectrum(bounds, values)
+    opensn = Spectrum(bounds, values * 1.01)
+    direct = Spectrum(bounds, values * 0.99)
+
+    figures = plot_spectra(openmc, opensn, direct)
+
+    expected_stride = groups // 20
+    for name in ("flux_spectrum", "lethargy_spectrum"):
+        axis = figures[name].axes[0]
+        marker_lines = [
+            line for line in axis.lines if line.get_label() == "_nolegend_"
+        ]
+        primary_lines = [
+            line for line in axis.lines if line.get_label() != "_nolegend_"
+        ]
+
+        assert len(marker_lines) == len(primary_lines) == 3
+        assert all(line.get_markevery() == expected_stride for line in marker_lines)
+        assert all(line.get_markersize() == pytest.approx(3.25) for line in marker_lines)
+        assert all(line.get_xdata().size == groups + 1 for line in primary_lines)
+
+    plt.close("all")
+
+
 def test_zero_energy_spectrum_uses_plotting_edge_without_mutating_physics():
     physical_bounds = np.array([0.0, 1.0, 1.0e8])
     openmc = Spectrum(physical_bounds, [1.0, 2.0], std_dev=[0.1, 0.2])
@@ -288,9 +352,13 @@ def test_zero_energy_spectrum_uses_plotting_edge_without_mutating_physics():
         figures = plot_spectra(openmc, opensn, direct)
 
     energy_axis = figures["flux_spectrum"].axes[0]
-    plotted_edges = energy_axis.patches[0].get_data().edges
+    openmc_energy_line = labelled_line(energy_axis, "OpenMC")
+    plotted_edges = openmc_energy_line.get_xdata()
     np.testing.assert_array_equal(plotted_edges, [1.0e-5, 1.0, 1.0e8])
-    assert energy_axis.lines[0].get_xdata()[0] == pytest.approx(0.5)
+    marker_line = next(
+        line for line in energy_axis.lines if line.get_label() == "_nolegend_"
+    )
+    assert marker_line.get_xdata()[0] == pytest.approx(0.5)
     assert energy_axis.get_xlim()[0] <= 1.0e-5
     assert energy_axis.get_xlim()[1] >= 1.0e8
 
@@ -299,12 +367,16 @@ def test_zero_energy_spectrum_uses_plotting_edge_without_mutating_physics():
     expected_energy = openmc.normalized / physical_widths
     expected_lethargy = physical_midpoints * expected_energy
     np.testing.assert_allclose(
-        energy_axis.patches[0].get_data().values,
-        expected_energy,
+        openmc_energy_line.get_ydata(),
+        np.insert(expected_energy, 0, expected_energy[0]),
+    )
+    openmc_lethargy_line = labelled_line(
+        figures["lethargy_spectrum"].axes[0],
+        "OpenMC",
     )
     np.testing.assert_allclose(
-        figures["lethargy_spectrum"].axes[0].patches[0].get_data().values,
-        expected_lethargy,
+        openmc_lethargy_line.get_ydata(),
+        np.insert(expected_lethargy, 0, expected_lethargy[0]),
     )
 
     for spectrum, bounds, values in zip(
@@ -373,9 +445,10 @@ def test_positive_energy_boundaries_are_unchanged_and_do_not_warn():
         mgxs_figures = plot_mgxs(mgxs)
 
     assert not any("Lowest energy boundary" in str(item.message) for item in caught)
-    spectrum_edges = (
-        spectrum_figures["flux_spectrum"].axes[0].patches[0].get_data().edges
-    )
+    spectrum_edges = labelled_line(
+        spectrum_figures["flux_spectrum"].axes[0],
+        "OpenMC",
+    ).get_xdata()
     mgxs_edges = mgxs_figures["cross_sections"].axes[0].patches[0].get_data().edges
     np.testing.assert_array_equal(spectrum_edges, direct.energy_bounds_ev)
     np.testing.assert_array_equal(mgxs_edges, mgxs.energy_bounds_ev)
