@@ -12,9 +12,9 @@ from typing import Literal
 import numpy as np
 
 
-# Public energy boundaries are always low-to-high in physical energy.  OpenMC's
-# MGXS file ordering and OpenSn's group numbering are converted only at their
-# respective I/O boundaries.
+# These two seed-specific structures are not present in OpenMC 0.15's standard
+# group library. Standard structures are resolved lazily from OpenMC instead of
+# copying OpenMC-owned boundary tables into this package.
 _WIMS69_MEV = (
     1e-11, 5e-9, 1e-8, 1.5e-8, 2e-8, 2.5e-8, 3e-8, 3.5e-8, 4.2e-8,
     5e-8, 5.8e-8, 6.7e-8, 8e-8, 1e-7, 1.4e-7, 1.8e-7, 2.2e-7,
@@ -45,7 +45,9 @@ _COMPOSITION_IDENTIFIER = re.compile(
 
 def _ascending(values, *, expected: int | None = None, name: str = "values") -> np.ndarray:
     array = np.asarray(values, dtype=float)
-    if array.ndim != 1 or (expected is not None and array.size != expected):
+    if array.ndim != 1 or array.size < 2:
+        raise ValueError(f"{name} must contain at least two edges")
+    if expected is not None and array.size != expected:
         raise ValueError(f"{name} has the wrong shape")
     if not np.all(np.isfinite(array)) or np.any(np.diff(array) <= 0.0):
         raise ValueError(f"{name} must be finite and strictly ascending")
@@ -73,13 +75,45 @@ def _integer(value, name: str, *, minimum: int) -> int:
     return result
 
 
-def energy_bounds(name: str) -> tuple[float, ...]:
-    """Return a named group structure as strictly ascending boundaries in eV."""
+def _openmc_energy_bounds(name: str) -> tuple[float, ...]:
+    """Resolve one canonical OpenMC group name without a module-level import."""
     try:
-        mev = {"WIMS69": _WIMS69_MEV, "LANL30": _LANL30_MEV}[name]
+        from openmc.mgxs import GROUP_STRUCTURES
+    except ImportError as error:
+        raise ImportError(
+            "OpenMC is required to resolve a named energy-group structure"
+        ) from error
+
+    try:
+        values = GROUP_STRUCTURES[name]
     except KeyError as error:
-        raise ValueError(f"unknown energy group structure {name!r}") from error
-    return tuple(float(value * 1.0e6) for value in mev)
+        raise ValueError(
+            f"unknown OpenMC energy-group structure {name!r}"
+        ) from error
+
+    return tuple(
+        float(value)
+        for value in _ascending(values, name=f"OpenMC group structure {name!r}")
+    )
+
+
+def energy_bounds(name: str) -> tuple[float, ...]:
+    """Return custom or OpenMC-standard ascending energy boundaries in eV."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("energy-group structure name must be a nonempty string")
+
+    custom = {
+        "WIMS69": _WIMS69_MEV,
+        "LANL30": _LANL30_MEV,
+    }
+    try:
+        # If OpenMC acquires a structure with the same spelling as a legacy
+        # custom name, OpenMC becomes the authority automatically.
+        return _openmc_energy_bounds(name)
+    except (ImportError, ValueError):
+        if name in custom:
+            return tuple(float(value * 1.0e6) for value in custom[name])
+        raise
 
 
 def source_probabilities(
@@ -191,14 +225,14 @@ class Material:
         self.role = role
 
 class Case:
-    """One independently preparable fixed-source OpenMC/OpenSn case."""
+    """One independently preparable case with named or explicit energy groups."""
 
     def __init__(
         self,
         *,
         name: str,
         materials,
-        energy_bounds_ev,
+        energy_groups,
         source_kind: Literal["uniform_energy", "watt", "grouped"],
         target_dimensions_cm,
         source_probabilities=None,
@@ -233,9 +267,15 @@ class Case:
         if len(materials) == 2 and roles != {"target", "moderator"}:
             raise ValueError("two materials must have target and moderator roles")
 
-        bounds = tuple(float(value) for value in _ascending(
-            energy_bounds_ev, name="energy boundaries"
-        ))
+        if isinstance(energy_groups, str):
+            energy_group_structure = energy_groups
+            bounds = _openmc_energy_bounds(energy_group_structure)
+        else:
+            energy_group_structure = None
+            bounds = tuple(
+                float(value)
+                for value in _ascending(energy_groups, name="energy boundaries")
+            )
         if source_kind not in {"uniform_energy", "watt", "grouped"}:
             raise ValueError("source kind must be uniform_energy, watt, or grouped")
 
@@ -276,6 +316,7 @@ class Case:
 
         self.name = name
         self.materials = materials
+        self.energy_group_structure = energy_group_structure
         self.energy_bounds_ev = bounds
         self.source_kind = source_kind
         self._grouped_source_probabilities = grouped
@@ -388,6 +429,7 @@ def _jsonable_case(case: Case) -> dict:
     return {
         "name": case.name,
         "materials": _material_records(case),
+        "energy_group_structure": case.energy_group_structure,
         "energy_bounds_ev": case.energy_bounds_ev,
         "source": case.source_definition,
         "source_probabilities": case.source_probabilities,

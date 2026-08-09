@@ -37,7 +37,8 @@ UO2 = Material(
 CASE = Case(
     name="uo2_in_hdpe",
     materials=(HDPE, UO2),  # ordering is deliberately unrelated to block assignment
-    energy_bounds_ev=BOUNDS_EV,
+    # LANL30 is custom and therefore remains an explicit ascending boundary tuple.
+    energy_groups=BOUNDS_EV,
     # The continuous OpenMC source and grouped OpenSn source share these parameters.
     source_kind="watt",
     watt_a_mev=0.988,

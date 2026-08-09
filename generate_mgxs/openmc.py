@@ -37,6 +37,25 @@ def _write_openmc_input(case: Case, path: Path) -> None:
         "total_histories": case.total_histories,
     }
 
+    if case.energy_group_structure is None:
+        explicit_bounds = pprint.pformat(
+            case.energy_bounds_ev, width=100, sort_dicts=False
+        )
+        energy_group_definition = (
+            "ENERGY_GROUP_STRUCTURE = None\n"
+            f"ENERGY_BOUNDS_EV = np.asarray({explicit_bounds}, dtype=float)\n"
+            "groups = openmc.mgxs.EnergyGroups(group_edges=ENERGY_BOUNDS_EV)"
+        )
+    else:
+        # Do not serialize OpenMC's boundary table. The generated model asks
+        # OpenMC to resolve the same canonical name used during preparation.
+        structure = json.dumps(case.energy_group_structure)
+        energy_group_definition = (
+            f"ENERGY_GROUP_STRUCTURE = {structure}\n"
+            f"groups = openmc.mgxs.EnergyGroups(group_edges={structure})\n"
+            "ENERGY_BOUNDS_EV = groups.group_edges"
+        )
+
     # The template is package data so this generator stays focused on mapping
     # Case values into a readable standalone solver program.
     text = (
@@ -56,9 +75,7 @@ def _write_openmc_input(case: Case, path: Path) -> None:
         "__MGXS_SETTINGS__": pprint.pformat(
             {"scattering_order": case.scattering_order}, width=100, sort_dicts=False
         ),
-        "__ENERGY_BOUNDS__": pprint.pformat(
-            case.energy_bounds_ev, width=100, sort_dicts=False
-        ),
+        "__ENERGY_GROUP_DEFINITION__": energy_group_definition,
     }
     for marker, value in replacements.items():
         text = text.replace(marker, value)

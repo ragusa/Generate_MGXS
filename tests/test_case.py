@@ -9,14 +9,76 @@ from conftest import material, tiny_case
 
 def test_named_group_structures_are_ascending():
     """All public scientific arrays use increasing physical energy."""
+    from openmc.mgxs import GROUP_STRUCTURES
+
     assert len(energy_bounds("WIMS69")) == 70
     assert len(energy_bounds("LANL30")) == 31
     assert np.all(np.diff(energy_bounds("WIMS69")) > 0.0)
+    np.testing.assert_array_equal(
+        energy_bounds("SHEM-361"),
+        GROUP_STRUCTURES["SHEM-361"],
+    )
 
 
 def test_unknown_group_structure_is_rejected():
-    with pytest.raises(ValueError, match="unknown"):
+    with pytest.raises(ValueError, match="unknown OpenMC energy-group structure"):
         energy_bounds("other")
+
+
+def test_case_resolves_openmc_standard_name_to_canonical_boundaries():
+    """The OpenMC registry, not a package copy, owns standard group edges."""
+    from openmc.mgxs import GROUP_STRUCTURES
+
+    case = Case(
+        name="shem",
+        materials=(material(),),
+        energy_groups="SHEM-361",
+        source_kind="uniform_energy",
+        target_dimensions_cm=(1.0, 1.0, 1.0),
+    )
+
+    assert case.energy_group_structure == "SHEM-361"
+    np.testing.assert_array_equal(
+        case.energy_bounds_ev,
+        GROUP_STRUCTURES["SHEM-361"],
+    )
+    expected_source = np.diff(GROUP_STRUCTURES["SHEM-361"])
+    expected_source /= expected_source.sum()
+    np.testing.assert_allclose(case.source_probabilities, expected_source)
+
+
+def test_case_constructor_uses_energy_groups_but_preserves_resolved_bounds():
+    import inspect
+
+    parameters = inspect.signature(Case).parameters
+    assert "energy_groups" in parameters
+    assert "energy_bounds_ev" not in parameters
+
+
+def test_case_rejects_unknown_openmc_standard_name():
+    with pytest.raises(ValueError, match="unknown OpenMC energy-group structure"):
+        Case(
+            name="unknown",
+            materials=(material(),),
+            energy_groups="NOT-A-GROUP-STRUCTURE",
+            source_kind="uniform_energy",
+            target_dimensions_cm=(1.0, 1.0, 1.0),
+        )
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [(), (1.0,), (1.0, np.nan), (2.0, 1.0), (1.0, 1.0)],
+)
+def test_case_rejects_invalid_custom_group_boundaries(bounds):
+    with pytest.raises(ValueError, match="two edges|strictly ascending"):
+        Case(
+            name="bad_bounds",
+            materials=(material(),),
+            energy_groups=bounds,
+            source_kind="uniform_energy",
+            target_dimensions_cm=(1.0, 1.0, 1.0),
+        )
 
 
 @pytest.mark.parametrize("bounds", [(1.0, 1.0, 2.0), (1.0, np.nan, 2.0), (2.0, 1.0)])
@@ -60,7 +122,7 @@ def test_source_kind_is_validated():
         Case(
             name="bad",
             materials=(material(),),
-            energy_bounds_ev=(1.0, 2.0),
+            energy_groups=(1.0, 2.0),
             source_kind="line",
             target_dimensions_cm=(1.0, 1.0, 1.0),
         )
@@ -70,7 +132,7 @@ def test_source_has_one_scientific_authority():
     uniform = Case(
         name="uniform",
         materials=(material(),),
-        energy_bounds_ev=(1.0, 2.0, 5.0),
+        energy_groups=(1.0, 2.0, 5.0),
         source_kind="uniform_energy",
         target_dimensions_cm=(1.0, 1.0, 1.0),
     )
@@ -79,7 +141,7 @@ def test_source_has_one_scientific_authority():
 
     with pytest.raises(ValueError, match="only a grouped"):
         Case(
-            name="duplicate", materials=(material(),), energy_bounds_ev=(1.0, 2.0),
+            name="duplicate", materials=(material(),), energy_groups=(1.0, 2.0),
             source_kind="uniform_energy", source_probabilities=(1.0,),
             target_dimensions_cm=(1.0, 1.0, 1.0),
         )
@@ -98,7 +160,7 @@ def test_grouped_source_validation(probabilities, message):
         Case(
             name="bad_grouped",
             materials=(material(),),
-            energy_bounds_ev=(1.0, 2.0, 3.0),
+            energy_groups=(1.0, 2.0, 3.0),
             source_kind="grouped",
             source_probabilities=probabilities,
             target_dimensions_cm=(1.0, 1.0, 1.0),
@@ -191,7 +253,7 @@ def test_case_exposes_only_genuine_opensn_convergence_controls():
 
 def test_geometry_and_solver_controls_are_validated():
     common = dict(
-        name="case", materials=(material(),), energy_bounds_ev=(1.0, 2.0),
+        name="case", materials=(material(),), energy_groups=(1.0, 2.0),
         source_kind="uniform_energy", target_dimensions_cm=(1.0, 1.0, 1.0),
     )
     for field, value, message in (
@@ -215,7 +277,7 @@ def test_moderated_outer_dimensions_strictly_enclose_target():
                 material("target", "target"),
                 material("mod", "moderator"),
             ),
-            energy_bounds_ev=(1.0, 2.0),
+            energy_groups=(1.0, 2.0),
             source_kind="uniform_energy",
             target_dimensions_cm=(1.0, 1.0, 1.0),
             outer_dimensions_cm=(2.0, 1.0, 2.0),

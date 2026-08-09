@@ -42,7 +42,7 @@ def tiny_case(two_material=False, *, max_iterations=50):
     return Case(
         name="tiny_two" if two_material else "tiny_one",
         materials=materials,
-        energy_bounds_ev=(1.0e-5, 1.0e6, 2.0e7),
+        energy_groups=(1.0e-5, 1.0e6, 2.0e7),
         source_probabilities=(0.25, 0.75),
         source_kind="grouped",
         target_dimensions_cm=target,

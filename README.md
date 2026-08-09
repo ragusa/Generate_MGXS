@@ -20,6 +20,27 @@ By default, `prepare()` writes `_metadata/run.json`, `openmc/model.py`, and
 `opensn/input.py`; it never starts a subprocess. This makes a plain generation
 loop sufficient for one or one hundred cases, with no campaign state.
 
+Energy groups may be a canonical OpenMC structure name or explicit custom
+boundaries:
+
+```python
+named_case = Case(
+    ...,
+    energy_groups="SHEM-361",
+)
+
+custom_case = Case(
+    ...,
+    energy_groups=LANL30_BOUNDS_EV,
+)
+```
+
+Named structures are validated and resolved lazily from
+`openmc.mgxs.GROUP_STRUCTURES`; this repository does not copy OpenMC's standard
+boundary tables. In both forms, `case.energy_bounds_ev` contains the resolved
+ascending numerical boundaries used by source integration, OpenSn, direct
+solutions, and result comparison.
+
 For OpenMC-only MGXS production, select only the OpenMC input:
 
 ```python

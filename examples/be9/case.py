@@ -22,7 +22,8 @@ BOUNDS_EV = energy_bounds("WIMS69")
 CASE = Case(
     name="be9",
     materials=(BE9,),
-    energy_bounds_ev=BOUNDS_EV,
+    # WIMS69 is not an OpenMC standard name, so retain its exact seed edges.
+    energy_groups=BOUNDS_EV,
     # Group probabilities are derived from this one physical source definition.
     source_kind="uniform_energy",
     target_dimensions_cm=(2.0, 2.0, 100.0),

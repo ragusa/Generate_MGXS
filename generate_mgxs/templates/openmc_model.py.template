@@ -34,8 +34,9 @@ MGXS_SETTINGS = __MGXS_SETTINGS__
 
 
 # --- Energy-group data and run-relative paths -----------------------------
-# Python-facing boundaries are always low-to-high in physical energy.
-ENERGY_BOUNDS_EV = np.asarray(__ENERGY_BOUNDS__, dtype=float)
+# Standard names are resolved once by OpenMC; custom boundaries remain explicit.
+# In either case, every source and tally below uses this one groups object.
+__ENERGY_GROUP_DEFINITION__
 RUN_DIRECTORY = Path(__file__).resolve().parents[1]
 OPENMC_DIRECTORY = RUN_DIRECTORY / "openmc"
 MGXS_TYPES = [
@@ -232,7 +233,6 @@ def build_model():
     model.settings = settings
 
     # --- MGXS tallies ------------------------------------------------------
-    groups = openmc.mgxs.EnergyGroups(group_edges=ENERGY_BOUNDS_EV)
     library = openmc.mgxs.Library(model.geometry)
     library.energy_groups = groups
     library.domain_type = "material"

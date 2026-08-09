@@ -63,6 +63,59 @@ def test_openmc_input_is_scientifically_readable(one_case, tmp_path):
     assert text.index("OPENMC_HISTORY_SETTINGS") < text.index("ENERGY_BOUNDS_EV =")
 
 
+def test_named_openmc_groups_remain_named_in_generated_model(tmp_path):
+    """SHEM boundaries are derived from one native OpenMC groups object."""
+    from openmc.mgxs import GROUP_STRUCTURES
+
+    case = Case(
+        name="shem",
+        materials=(material(),),
+        energy_groups="SHEM-361",
+        source_kind="uniform_energy",
+        target_dimensions_cm=(1.0, 1.0, 1.0),
+    )
+    run = prepare(case, tmp_path / "shem")
+    model_text = (run / "openmc/model.py").read_text()
+    opensn_text = (run / "opensn/input.py").read_text()
+    metadata = json.loads((run / "_metadata/run.json").read_text())
+
+    assert 'ENERGY_GROUP_STRUCTURE = "SHEM-361"' in model_text
+    assert 'EnergyGroups(group_edges="SHEM-361")' in model_text
+    assert "ENERGY_BOUNDS_EV = groups.group_edges" in model_text
+    assert "ENERGY_BOUNDS_EV = np.asarray(" not in model_text
+    assert "np.diff(ENERGY_BOUNDS_EV)" in model_text
+    assert "library.energy_groups = groups" in model_text
+    assert '"energy_bounds": ENERGY_BOUNDS_EV.tolist()' in model_text
+    assert metadata["case"]["energy_group_structure"] == "SHEM-361"
+    np.testing.assert_array_equal(
+        metadata["case"]["energy_bounds_ev"],
+        GROUP_STRUCTURES["SHEM-361"],
+    )
+
+    # OpenSn has no named-group registry, so it receives the resolved values
+    # derived from OpenMC during preparation.
+    np.testing.assert_array_equal(
+        _array_literal_assignment(
+            opensn_text,
+            "ENERGY_BOUNDS_EV_ASCENDING",
+        ),
+        GROUP_STRUCTURES["SHEM-361"],
+    )
+
+
+def test_custom_groups_remain_explicit_in_generated_model(one_case, tmp_path):
+    """Custom edges stay visible and feed the same OpenMC groups object."""
+    model_text = (
+        prepare(one_case, tmp_path / "custom") / "openmc/model.py"
+    ).read_text()
+
+    assert "ENERGY_GROUP_STRUCTURE = None" in model_text
+    assert "ENERGY_BOUNDS_EV = np.asarray(" in model_text
+    assert "EnergyGroups(group_edges=ENERGY_BOUNDS_EV)" in model_text
+    generated = _array_literal_assignment(model_text, "ENERGY_BOUNDS_EV")
+    np.testing.assert_array_equal(generated, one_case.energy_bounds_ev)
+
+
 def test_opensn_input_is_scientifically_readable(one_case, tmp_path):
     text = (prepare(one_case, tmp_path / "run") / "opensn/input.py").read_text()
 
@@ -122,7 +175,7 @@ def test_openmc_and_opensn_sources_share_one_generated_authority(tmp_path):
     case = Case(
         name="watt",
         materials=(material(),),
-        energy_bounds_ev=bounds,
+        energy_groups=bounds,
         source_kind="watt",
         watt_a_mev=0.988,
         watt_b_per_mev=2.249,
@@ -153,7 +206,7 @@ def test_generated_openmc_marks_nuclides_and_natural_elements(tmp_path):
     case = Case(
         name="steel",
         materials=(material_definition,),
-        energy_bounds_ev=(1.0, 2.0),
+        energy_groups=(1.0, 2.0),
         source_kind="uniform_energy",
         target_dimensions_cm=(1.0, 1.0, 1.0),
     )
@@ -217,7 +270,7 @@ def test_fixed_opensn_verifier_is_independent_of_case_size_and_group_count(
     hdpe_shem_like = Case(
         name="hdpe_shem_like",
         materials=(hdpe,),
-        energy_bounds_ev=tuple(np.linspace(0.0, 2.0e7, 362)),
+        energy_groups=tuple(np.linspace(0.0, 2.0e7, 362)),
         source_kind="uniform_energy",
         target_dimensions_cm=(20.0, 30.0, 400.0),
         scattering_order=3,
@@ -423,7 +476,7 @@ def test_multiple_cases_prepare_as_independent_directories(tmp_path, monkeypatch
     cases = [
         Case(
             name=f"material_{index:03d}", materials=(material(f"domain_{index}"),),
-            energy_bounds_ev=(1.0, 2.0, 4.0 + index), source_kind="uniform_energy",
+            energy_groups=(1.0, 2.0, 4.0 + index), source_kind="uniform_energy",
             target_dimensions_cm=(float(index), 1.0, 1.0),
         )
         for index in (1, 2, 3)
