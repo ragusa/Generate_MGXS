@@ -1,0 +1,403 @@
+"""Scientific case definitions and run-directory preparation."""
+
+from __future__ import annotations
+
+from hashlib import sha256
+import json
+import math
+from pathlib import Path
+from typing import Literal
+
+import numpy as np
+
+
+# Public energy boundaries are always low-to-high in physical energy.  OpenMC's
+# MGXS file ordering and OpenSn's group numbering are converted only at their
+# respective I/O boundaries.
+_WIMS69_MEV = (
+    1e-11, 5e-9, 1e-8, 1.5e-8, 2e-8, 2.5e-8, 3e-8, 3.5e-8, 4.2e-8,
+    5e-8, 5.8e-8, 6.7e-8, 8e-8, 1e-7, 1.4e-7, 1.8e-7, 2.2e-7,
+    2.5e-7, 2.8e-7, 3e-7, 3.2e-7, 3.5e-7, 4e-7, 5e-7, 6.25e-7,
+    7.8e-7, 8.5e-7, 9.1e-7, 9.5e-7, 9.72e-7, 9.96e-7, 1.02e-6,
+    1.045e-6, 1.071e-6, 1.097e-6, 1.123e-6, 1.15e-6, 1.3e-6,
+    1.5e-6, 2.1e-6, 2.6e-6, 3.3e-6, 4e-6, 9.877e-6, 1.5968e-5,
+    2.77e-5, 4.8052e-5, 7.55014e-5, 1.48729e-4, 3.67263e-4,
+    9.06899e-4, 1.4251e-3, 2.23945e-3, 3.5191e-3, 5.53e-3,
+    9.118e-3, 1.503e-2, 2.478e-2, 4.085e-2, 6.734e-2, 1.11e-1,
+    1.83e-1, 3.025e-1, 5e-1, 8.21e-1, 1.353, 2.231, 3.679, 6.0655,
+    10.0,
+)
+_LANL30_MEV = (
+    1.39e-10, 1.52e-7, 4.14e-7, 1.13e-6, 3.06e-6, 8.32e-6, 2.26e-5,
+    6.14e-5, 1.67e-4, 4.54e-4, 1.235e-3, 3.35e-3, 9.12e-3, 2.48e-2,
+    6.76e-2, 0.184, 0.303, 0.5, 0.823, 1.353, 1.738, 2.232, 2.865,
+    3.68, 6.07, 7.79, 10.0, 12.0, 13.5, 15.0, 17.0,
+)
+
+
+def _ascending(values, *, expected: int | None = None, name: str = "values") -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1 or (expected is not None and array.size != expected):
+        raise ValueError(f"{name} has the wrong shape")
+    if not np.all(np.isfinite(array)) or np.any(np.diff(array) <= 0.0):
+        raise ValueError(f"{name} must be finite and strictly ascending")
+    return array
+
+
+def _positive_float(value, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be finite and positive") from error
+    if not math.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be finite and positive")
+    return result
+
+
+def _integer(value, name: str, *, minimum: int) -> int:
+    # bool is an int subclass, but accepting True as one particle or one angle
+    # silently masks malformed scientific input.
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    result = int(value)
+    if result < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return result
+
+
+def energy_bounds(name: str) -> tuple[float, ...]:
+    """Return a named group structure as strictly ascending boundaries in eV."""
+    try:
+        mev = {"WIMS69": _WIMS69_MEV, "LANL30": _LANL30_MEV}[name]
+    except KeyError as error:
+        raise ValueError(f"unknown energy group structure {name!r}") from error
+    return tuple(float(value * 1.0e6) for value in mev)
+
+
+def source_probabilities(
+    bounds_ev, kind: Literal["uniform_energy", "watt"], *, a_mev=0.988, b_per_mev=2.249
+) -> tuple[float, ...]:
+    """Integrate a physical source into ascending-energy group probabilities."""
+    bounds = _ascending(bounds_ev, name="energy boundaries")
+    if kind == "uniform_energy":
+        masses = np.diff(bounds)
+    elif kind == "watt":
+        a_mev = _positive_float(a_mev, "Watt a_mev")
+        b_per_mev = _positive_float(b_per_mev, "Watt b_per_mev")
+        bounds_mev = bounds / 1.0e6
+        # Fixed-order Gauss-Legendre integration makes generated cases
+        # deterministic while accurately resolving the smooth Watt spectrum.
+        nodes, weights = np.polynomial.legendre.leggauss(64)
+        masses = []
+        for low, high in zip(bounds_mev[:-1], bounds_mev[1:]):
+            energies = 0.5 * (high - low) * nodes + 0.5 * (high + low)
+            density = np.exp(-energies / a_mev) * np.sinh(
+                np.sqrt(b_per_mev * energies)
+            )
+            masses.append(0.5 * (high - low) * np.dot(weights, density))
+        masses = np.asarray(masses)
+    else:
+        raise ValueError("source kind must be 'uniform_energy' or 'watt'")
+    if not np.all(np.isfinite(masses)) or np.any(masses < 0.0) or masses.sum() <= 0.0:
+        raise ValueError("source integration produced invalid group masses")
+    masses /= masses.sum()
+    # Close the probability vector exactly enough for downstream serialization;
+    # the correction is roundoff-sized and is applied to a populated end group.
+    masses[-1] += 1.0 - masses.sum()
+    return tuple(float(value) for value in masses)
+
+
+class Material:
+    """A material composition identified by its physical geometry role."""
+
+    def __init__(
+        self,
+        logical_name: str,
+        name: str,
+        density_g_cm3: float,
+        isotopes,
+        temperature_k: float = 294.0,
+        thermal_scattering=(),
+        role: Literal["homogeneous", "target", "moderator"] = "homogeneous",
+    ):
+        if not isinstance(logical_name, str) or not logical_name.strip():
+            raise ValueError("logical_name cannot be empty")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("material name cannot be empty")
+        if role not in {"homogeneous", "target", "moderator"}:
+            raise ValueError("material role must be homogeneous, target, or moderator")
+        try:
+            composition = tuple((str(isotope), float(fraction)) for isotope, fraction in isotopes)
+        except (TypeError, ValueError) as error:
+            raise ValueError("material composition must contain isotope/fraction pairs") from error
+        if not composition or any(not isotope.strip() for isotope, _ in composition):
+            raise ValueError("material composition cannot be empty")
+        fractions = np.asarray([fraction for _, fraction in composition], dtype=float)
+        if (
+            not np.all(np.isfinite(fractions))
+            or np.any(fractions < 0.0)
+            or not np.any(fractions > 0.0)
+            or not np.isclose(fractions.sum(), 1.0, rtol=0.0, atol=1.0e-12)
+        ):
+            raise ValueError("material atom fractions must be finite, nonnegative, and sum to one")
+        thermal_scattering = tuple(str(table) for table in thermal_scattering)
+        if any(not table.strip() for table in thermal_scattering):
+            raise ValueError("thermal-scattering table names cannot be empty")
+
+        self.logical_name = logical_name
+        self.name = name
+        self.density_g_cm3 = _positive_float(density_g_cm3, "material density")
+        self.isotopes = composition
+        self.temperature_k = _positive_float(temperature_k, "material temperature")
+        self.thermal_scattering = thermal_scattering
+        self.role = role
+
+    @property
+    def opensn_block(self) -> int:
+        """Return the block fixed by the supported target/moderator geometry."""
+        return 1 if self.role == "moderator" else 0
+
+
+class Case:
+    """One independently preparable fixed-source OpenMC/OpenSn case."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        materials,
+        energy_bounds_ev,
+        source_kind: Literal["uniform_energy", "watt", "grouped"],
+        target_dimensions_cm,
+        source_probabilities=None,
+        outer_dimensions_cm=None,
+        boundaries=("reflective",) * 6,
+        particles_per_batch: int = 25_000,
+        batches: int = 40,
+        mesh_max_width_cm=(1.0, 1.0, 1.0),
+        num_polar: int = 4,
+        num_azimuthal: int = 8,
+        scattering_order: int = 3,
+        gmres_tolerance: float = 1.0e-10,
+        gmres_max_iterations: int = 1200,
+        gmres_restart: int = 100,
+        watt_a_mev: float = 0.988,
+        watt_b_per_mev: float = 2.249,
+    ):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("case name cannot be empty")
+        materials = tuple(materials)
+        if not materials or len(materials) > 2 or not all(isinstance(x, Material) for x in materials):
+            raise ValueError("a case requires one material or a target and moderator")
+        logical_names = [material.logical_name for material in materials]
+        if len(set(logical_names)) != len(logical_names):
+            raise ValueError("logical material names must be unique")
+        roles = {material.role for material in materials}
+        if len(materials) == 1 and roles != {"homogeneous"}:
+            raise ValueError("one material must have the homogeneous role")
+        if len(materials) == 2 and roles != {"target", "moderator"}:
+            raise ValueError("two materials must have target and moderator roles")
+
+        bounds = tuple(float(value) for value in _ascending(
+            energy_bounds_ev, name="energy boundaries"
+        ))
+        if source_kind not in {"uniform_energy", "watt", "grouped"}:
+            raise ValueError("source kind must be uniform_energy, watt, or grouped")
+        watt_a_mev = _positive_float(watt_a_mev, "Watt a_mev")
+        watt_b_per_mev = _positive_float(watt_b_per_mev, "Watt b_per_mev")
+        grouped = None
+        if source_kind == "grouped":
+            if source_probabilities is None:
+                raise ValueError("grouped source requires source_probabilities")
+            grouped_array = np.asarray(source_probabilities, dtype=float)
+            if grouped_array.shape != (len(bounds) - 1,) or not np.all(np.isfinite(grouped_array)):
+                raise ValueError("source probabilities must contain one finite value per group")
+            if np.any(grouped_array < 0.0) or not np.isclose(
+                grouped_array.sum(), 1.0, rtol=0.0, atol=1.0e-12
+            ):
+                raise ValueError("source probabilities must be nonnegative and sum to one")
+            grouped = tuple(float(value) for value in grouped_array)
+        elif source_probabilities is not None:
+            raise ValueError("only a grouped source accepts source_probabilities")
+
+        target = self._dimensions(target_dimensions_cm, "target dimensions")
+        outer = None if outer_dimensions_cm is None else self._dimensions(
+            outer_dimensions_cm, "outer dimensions"
+        )
+        if len(materials) == 2:
+            if outer is None or any(outside <= inside for inside, outside in zip(target, outer)):
+                raise ValueError("moderated outer dimensions must strictly exceed target dimensions")
+        elif outer is not None and outer != target:
+            raise ValueError("a homogeneous case does not have distinct outer dimensions")
+
+        boundaries = tuple(boundaries)
+        if len(boundaries) != 6 or any(x not in {"reflective", "vacuum"} for x in boundaries):
+            raise ValueError("six reflective/vacuum boundary values are required")
+
+        self.name = name
+        self.materials = materials
+        self.energy_bounds_ev = bounds
+        self.source_kind = source_kind
+        self._grouped_source_probabilities = grouped
+        self.target_dimensions_cm = target
+        self.outer_dimensions_cm = outer
+        self.boundaries = boundaries
+        self.particles_per_batch = _integer(
+            particles_per_batch, "particles_per_batch", minimum=1
+        )
+        self.batches = _integer(batches, "batches", minimum=1)
+        self.mesh_max_width_cm = self._dimensions(mesh_max_width_cm, "mesh widths")
+        self.num_polar = _integer(num_polar, "num_polar", minimum=1)
+        self.num_azimuthal = _integer(num_azimuthal, "num_azimuthal", minimum=1)
+        self.scattering_order = _integer(scattering_order, "scattering_order", minimum=0)
+        self.gmres_tolerance = _positive_float(gmres_tolerance, "gmres_tolerance")
+        self.gmres_max_iterations = _integer(
+            gmres_max_iterations, "gmres_max_iterations", minimum=1
+        )
+        self.gmres_restart = _integer(gmres_restart, "gmres_restart", minimum=1)
+        self.watt_a_mev = watt_a_mev
+        self.watt_b_per_mev = watt_b_per_mev
+
+    @staticmethod
+    def _dimensions(values, name: str) -> tuple[float, float, float]:
+        try:
+            dimensions = tuple(float(value) for value in values)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must contain three finite positive values") from error
+        if len(dimensions) != 3 or any(not math.isfinite(x) or x <= 0.0 for x in dimensions):
+            raise ValueError(f"{name} must contain three finite positive values")
+        return dimensions
+
+    @property
+    def source_probabilities(self) -> tuple[float, ...]:
+        """Return final group probabilities in ascending physical-energy order."""
+        if self.source_kind == "grouped":
+            return self._grouped_source_probabilities
+        return source_probabilities(
+            self.energy_bounds_ev,
+            self.source_kind,
+            a_mev=self.watt_a_mev,
+            b_per_mev=self.watt_b_per_mev,
+        )
+
+    @property
+    def source_definition(self) -> dict:
+        """Return the single physical source definition used by both solvers."""
+        if self.source_kind == "uniform_energy":
+            return {"kind": "uniform_energy"}
+        if self.source_kind == "watt":
+            return {
+                "kind": "watt",
+                "a_mev": self.watt_a_mev,
+                "b_per_mev": self.watt_b_per_mev,
+            }
+        return {"kind": "grouped", "probabilities": self.source_probabilities}
+
+    @property
+    def source_volume_cm3(self) -> float:
+        """Return the target volume over which the unit source is distributed."""
+        return math.prod(self.target_dimensions_cm)
+
+    @property
+    def geometry_type(self) -> str:
+        """Return the generated geometry implementation selected by material roles."""
+        return "homogeneous" if len(self.materials) == 1 else "moderated_target"
+
+    @property
+    def total_histories(self) -> int:
+        """Return the total source histories requested across all batches."""
+        return self.batches * self.particles_per_batch
+
+
+def _material_records(case: Case) -> list[dict]:
+    # OpenMC IDs are serialization details, not physics. Sorting logical names
+    # makes them stable even when the caller supplies target/moderator in another order.
+    openmc_ids = {
+        name: index for index, name in enumerate(
+            sorted(material.logical_name for material in case.materials), start=1
+        )
+    }
+    return [
+        {
+            "logical_name": material.logical_name,
+            "name": material.name,
+            "density_g_cm3": material.density_g_cm3,
+            "isotopes": material.isotopes,
+            "temperature_k": material.temperature_k,
+            "thermal_scattering": material.thermal_scattering,
+            "role": material.role,
+            "openmc_id": openmc_ids[material.logical_name],
+            "opensn_block": material.opensn_block,
+        }
+        for material in case.materials
+    ]
+
+
+def _jsonable_case(case: Case) -> dict:
+    return {
+        "name": case.name,
+        "materials": _material_records(case),
+        "energy_bounds_ev": case.energy_bounds_ev,
+        "source": case.source_definition,
+        "source_probabilities": case.source_probabilities,
+        "target_dimensions_cm": case.target_dimensions_cm,
+        "outer_dimensions_cm": case.outer_dimensions_cm,
+        "boundaries": case.boundaries,
+        "particles_per_batch": case.particles_per_batch,
+        "batches": case.batches,
+        "total_histories": case.total_histories,
+        "mesh_max_width_cm": case.mesh_max_width_cm,
+        "num_polar": case.num_polar,
+        "num_azimuthal": case.num_azimuthal,
+        "scattering_order": case.scattering_order,
+        "gmres_tolerance": case.gmres_tolerance,
+        "gmres_max_iterations": case.gmres_max_iterations,
+        "gmres_restart": case.gmres_restart,
+        "geometry_type": case.geometry_type,
+        "source_volume_cm3": case.source_volume_cm3,
+    }
+
+
+def _artifact(path: Path, root: Path) -> dict:
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "bytes": path.stat().st_size,
+        "sha256": sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _update_run_metadata(run_directory: Path, **updates) -> None:
+    path = run_directory / "_metadata" / "run.json"
+    data = json.loads(path.read_text()) if path.exists() else {}
+    if "artifacts" in updates:
+        merged = {item["path"]: item for item in data.get("artifacts", [])}
+        merged.update({item["path"]: item for item in updates["artifacts"]})
+        updates["artifacts"] = [merged[name] for name in sorted(merged)]
+    data.update(updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
+
+
+def prepare(case: Case, run_directory) -> Path:
+    """Generate independent solver inputs without starting either solver."""
+    if not isinstance(case, Case):
+        raise TypeError("case must be a Case")
+    from .openmc import _write_openmc_input
+    from .opensn import _write_opensn_input
+
+    run = Path(run_directory).resolve()
+    openmc_input = run / "openmc" / "model.py"
+    opensn_input = run / "opensn" / "input.py"
+    openmc_input.parent.mkdir(parents=True, exist_ok=True)
+    opensn_input.parent.mkdir(parents=True, exist_ok=True)
+    _write_openmc_input(case, openmc_input)
+    _write_opensn_input(case, opensn_input)
+    from . import __version__
+
+    _update_run_metadata(
+        run,
+        case=_jsonable_case(case),
+        generate_mgxs_version=__version__,
+        artifacts=[_artifact(openmc_input, run), _artifact(opensn_input, run)],
+    )
+    return run

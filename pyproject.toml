@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "generate-mgxs"
+version = "0.1.0"
+description = "Transparent OpenMC to OpenSn multigroup fixed-source calculations"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["h5py>=3.8", "numpy>=1.24"]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.7"]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["generate_mgxs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["opensn: requires the supplied OpenSn runtime"]
+
