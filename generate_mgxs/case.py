@@ -444,23 +444,57 @@ def _update_run_metadata(run_directory: Path, **updates) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
-def prepare(case: Case, run_directory) -> Path:
-    """Generate independent solver inputs without starting either solver."""
+def prepare(
+    case: Case,
+    run_directory,
+    *,
+    solvers=("openmc", "opensn"),
+) -> Path:
+    """Generate selected solver inputs without starting a subprocess."""
     if not isinstance(case, Case):
         raise TypeError("case must be a Case")
+
+    if isinstance(solvers, (str, bytes)):
+        raise ValueError("solvers must be an iterable of solver names")
+    try:
+        requested = tuple(solvers)
+    except TypeError as error:
+        raise ValueError("solvers must be an iterable of solver names") from error
+
+    if not requested:
+        raise ValueError("at least one solver must be selected")
+    if any(not isinstance(name, str) for name in requested):
+        raise ValueError("solver names must be strings")
+    if len(set(requested)) != len(requested):
+        raise ValueError("solver names must not be duplicated")
+
+    unknown = set(requested) - {"openmc", "opensn"}
+    if unknown:
+        raise ValueError(f"unknown solver {sorted(unknown)[0]!r}")
+    if "opensn" in requested and "openmc" not in requested:
+        raise ValueError("OpenSn preparation requires OpenMC")
+
+    # Store and generate in dependency order even when the caller supplies an
+    # unordered iterable such as a set.
+    selected = tuple(name for name in ("openmc", "opensn") if name in requested)
+
     from .openmc import _write_openmc_input
-    from .opensn import _write_opensn_input
 
     # Each prepared directory is self-contained; generation never depends on
     # or updates shared campaign state.
     run = Path(run_directory).resolve()
     openmc_input = run / "openmc" / "model.py"
-    opensn_input = run / "opensn" / "input.py"
     openmc_input.parent.mkdir(parents=True, exist_ok=True)
-    opensn_input.parent.mkdir(parents=True, exist_ok=True)
-
     _write_openmc_input(case, openmc_input)
-    _write_opensn_input(case, opensn_input)
+
+    artifacts = [_artifact(openmc_input, run)]
+    if "opensn" in selected:
+        from .opensn import _write_opensn_input
+
+        opensn_input = run / "opensn" / "input.py"
+        opensn_input.parent.mkdir(parents=True, exist_ok=True)
+        _write_opensn_input(case, opensn_input)
+        artifacts.append(_artifact(opensn_input, run))
 
     from . import __version__
 
@@ -468,6 +502,8 @@ def prepare(case: Case, run_directory) -> Path:
         run,
         case=_jsonable_case(case),
         generate_mgxs_version=__version__,
-        artifacts=[_artifact(openmc_input, run), _artifact(opensn_input, run)],
+        solvers=list(selected),
+        artifacts=artifacts,
     )
+
     return run

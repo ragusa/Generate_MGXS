@@ -70,7 +70,9 @@ raise SystemExit({code})
 
 
 def test_openmc_success_and_required_outputs(one_case, tmp_path):
-    run = prepare(one_case, tmp_path / "run")
+    # OpenMC execution depends only on its generated model, so the helper must
+    # work identically when OpenSn input was deliberately omitted.
+    run = prepare(one_case, tmp_path / "run", solvers=("openmc",))
     cross_sections = tmp_path / "cross_sections.xml"
     cross_sections.write_text("<cross_sections/>")
 
@@ -81,6 +83,7 @@ def test_openmc_success_and_required_outputs(one_case, tmp_path):
     )
 
     assert result == run / "openmc/mgxs.h5"
+    assert not (run / "opensn").exists()
     assert (run / "logs/openmc.stdout").is_file()
     assert (run / "diagnostics/mgxs_uncertainty.json").is_file()
 
@@ -163,6 +166,14 @@ def prepared_fake_opensn(one_case, tmp_path, *, result=True):
     if result:
         write_result(run / "opensn/opensn_result.json")
     return run
+
+
+def test_opensn_rejects_openmc_only_preparation_before_execution(one_case, tmp_path):
+    """Execution must not silently manufacture a solver input omitted by prepare()."""
+    run_path = prepare(one_case, tmp_path / "run", solvers=("openmc",))
+
+    with pytest.raises(FileNotFoundError, match="OpenSn input was not prepared"):
+        run_opensn(run_path, executable=tmp_path / "never-used")
 
 
 def test_opensn_success_requires_parsed_convergence(one_case, tmp_path):

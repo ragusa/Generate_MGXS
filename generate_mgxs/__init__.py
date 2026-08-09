@@ -5,7 +5,7 @@ from .direct import solve_infinite_medium
 from .mgxs import MGXS, load_mgxs
 from .openmc import load_openmc_result, run_openmc
 from .opensn import load_opensn_result, run_opensn
-from .plotting import plot_spectra
+from .plotting import plot_mgxs, plot_spectra
 from .results import InfiniteMediumSolution, OpenSnResult, Spectrum
 
 __version__ = "0.1.0"
@@ -21,6 +21,7 @@ __all__ = [
     "load_mgxs",
     "load_openmc_result",
     "load_opensn_result",
+    "plot_mgxs",
     "plot_spectra",
     "prepare",
     "run_openmc",

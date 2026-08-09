@@ -8,19 +8,40 @@ are converted at their boundaries only.
 Define a `Case`, then prepare an independent run directory:
 
 ```python
+from pathlib import Path
+
 from generate_mgxs import prepare
 from my_case import CASE
 
-run_directory = prepare(CASE, "results/material_001")
+run_path = prepare(CASE, Path("results/material_001"))
 ```
 
-`prepare()` only writes `_metadata/run.json`, `openmc/model.py`, and
+By default, `prepare()` writes `_metadata/run.json`, `openmc/model.py`, and
 `opensn/input.py`; it never starts a subprocess. This makes a plain generation
-loop sufficient for one or one hundred cases, with no campaign state:
+loop sufficient for one or one hundred cases, with no campaign state.
+
+For OpenMC-only MGXS production, select only the OpenMC input:
+
+```python
+run_path = prepare(
+    CASE,
+    Path("results/material_001"),
+    solvers=("openmc",),
+)
+```
+
+The resulting directory contains `openmc/model.py` and `_metadata/run.json`,
+with no OpenSn directory. This is useful for large material libraries,
+parameter sweeps, external shell scripts, SLURM array jobs, and any workflow
+that only needs OpenMC MGXS production:
 
 ```python
 for case in cases:
-    prepare(case, results_root / case.name)
+    run_path = prepare(
+        case,
+        results_root / case.name,
+        solvers=("openmc",),
+    )
 ```
 
 Each directory is independently executable later. Set portable environment
@@ -69,9 +90,27 @@ Python execution helpers remain optional conveniences:
 ```python
 from generate_mgxs import run_openmc, run_opensn
 
-run_openmc(run_directory, cross_sections="/path/to/cross_sections.xml")
-run_opensn(run_directory, executable="/path/to/opensn-console")
+run_openmc(run_path, cross_sections="/path/to/cross_sections.xml")
+run_opensn(run_path, executable="/path/to/opensn-console")
 ```
+
+MGXS plotting is separate scientific postprocessing and does not execute a
+solver or read an OpenMC statepoint:
+
+```python
+from generate_mgxs import load_mgxs, plot_mgxs
+
+mgxs = load_mgxs(run_path / "openmc/mgxs.h5", "be9", 294.0)
+figures = plot_mgxs(
+    mgxs,
+    output_directory=run_path / "plots",
+    scatter_moments=(0,),
+)
+```
+
+The returned dictionary contains the applicable cross-section, chi,
+scattering-moment, and derived fission-production figures. Energy axes use the
+package's ascending-eV convention; plotting never requires OpenSn.
 
 Complete, commented Be-9 and UO2-in-HDPE definitions are in `examples/`.
 Their run scripts use `OPENMC_CROSS_SECTIONS` and `OPENSN_CONSOLE`; no

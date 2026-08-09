@@ -197,6 +197,38 @@ def test_prepare_writes_only_nonempty_scientific_directories(one_case, tmp_path)
     assert (run / "notes.md").read_text() == "my notes"
 
 
+def test_prepare_openmc_only_writes_no_opensn_input(one_case, tmp_path):
+    """OpenMC-only generation must not leave an empty or misleading OpenSn tree."""
+    run_path = prepare(one_case, tmp_path / "run", solvers=("openmc",))
+    generated_files = {
+        path.relative_to(run_path).as_posix()
+        for path in run_path.rglob("*")
+        if path.is_file()
+    }
+    metadata = json.loads((run_path / "_metadata/run.json").read_text())
+
+    assert generated_files == {"_metadata/run.json", "openmc/model.py"}
+    assert not (run_path / "opensn").exists()
+    assert metadata["solvers"] == ["openmc"]
+    assert [item["path"] for item in metadata["artifacts"]] == ["openmc/model.py"]
+
+
+@pytest.mark.parametrize(
+    ("solvers", "message"),
+    [
+        ((), "at least one"),
+        (("unknown",), "unknown solver"),
+        (("opensn",), "requires OpenMC"),
+        (("openmc", "openmc"), "duplicated"),
+        (("openmc", 1), "must be strings"),
+        ("openmc", "iterable of solver names"),
+    ],
+)
+def test_prepare_rejects_invalid_solver_selections(one_case, tmp_path, solvers, message):
+    with pytest.raises(ValueError, match=message):
+        prepare(one_case, tmp_path / "run", solvers=solvers)
+
+
 def test_minimal_metadata_has_case_and_input_hashes(one_case, tmp_path):
     run = prepare(one_case, tmp_path / "run")
     metadata = json.loads((run / "_metadata/run.json").read_text())
@@ -205,6 +237,7 @@ def test_minimal_metadata_has_case_and_input_hashes(one_case, tmp_path):
     assert metadata["case"]["source_volume_cm3"] == 1.0
     assert metadata["case"]["particles_per_batch"] == 10
     assert metadata["case"]["total_histories"] == 20
+    assert metadata["solvers"] == ["openmc", "opensn"]
     assert {item["path"] for item in metadata["artifacts"]} == {
         "openmc/model.py",
         "opensn/input.py",
@@ -278,6 +311,8 @@ def test_examples_show_the_complete_workflows():
     assert "/home/ragusa/" not in be9 + moderated
     assert "OPENMC_CROSS_SECTIONS" in be9 + moderated
     assert "OPENSN_CONSOLE" in be9 + moderated
+    assert "run_path = prepare" in be9 + moderated
+    assert "plot_mgxs" in be9 + moderated
 
 
 def test_prepare_does_not_execute_subprocesses(one_case, tmp_path, monkeypatch):
@@ -305,6 +340,11 @@ def test_multiple_cases_prepare_as_independent_directories(tmp_path, monkeypatch
             AssertionError("solver executed during preparation")
         ),
     )
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("solver executed during preparation")
+        ),
+    )
     cases = [
         Case(
             name=f"material_{index:03d}", materials=(material(f"domain_{index}"),),
@@ -313,11 +353,20 @@ def test_multiple_cases_prepare_as_independent_directories(tmp_path, monkeypatch
         )
         for index in (1, 2, 3)
     ]
-    runs = [prepare(case, tmp_path / case.name) for case in cases]
+    runs = [
+        prepare(case, tmp_path / case.name, solvers=("openmc",))
+        for case in cases
+    ]
+
     assert len({run.resolve() for run in runs}) == len(cases)
     for case, run in zip(cases, runs):
         openmc_text = (run / "openmc/model.py").read_text()
-        opensn_text = (run / "opensn/input.py").read_text()
-        assert repr(case.name) in openmc_text and repr(case.name) in opensn_text
+
+        assert repr(case.name) in openmc_text
+        assert not (run / "opensn").exists()
         assert (run / "_metadata/run.json").is_file()
+        # A later shell/SLURM job receives a complete standalone Python model,
+        # not a reference to the in-memory Case used during this loop.
+        compile(openmc_text, str(run / "openmc/model.py"), "exec")
+
     assert len({(run / "openmc/model.py").read_text() for run in runs}) == len(cases)

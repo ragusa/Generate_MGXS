@@ -143,7 +143,7 @@ def run_opensn(
     input_path = run / "opensn" / "input.py"
     mgxs = run / "openmc" / "mgxs.h5"
     if not input_path.is_file():
-        raise FileNotFoundError(f"generated OpenSn input is missing: {input_path}")
+        raise FileNotFoundError("OpenSn input was not prepared for this run")
     if not mgxs.is_file():
         raise FileNotFoundError(f"OpenMC MGXS HDF5 is missing: {mgxs}")
 
