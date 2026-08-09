@@ -126,8 +126,9 @@ def run_openmc(
     }
     _update_run_metadata(run, openmc=openmc_metadata)
 
-    # Stream both operations into persistent logs. If transport or processing
-    # fails, diagnostics written before the failure remain available.
+    # Give each phase persistent logs of its own. A later processing call must
+    # not erase transport diagnostics, and either phase may retain partial
+    # output when its subprocess fails.
     logs = run / "logs"
     logs.mkdir(parents=True, exist_ok=True)
 
@@ -138,11 +139,12 @@ def run_openmc(
     environment["OPENMC_CROSS_SECTIONS"] = str(cross_sections)
     environment["MGXS_PROCESSES"] = str(threads)
 
-    with (
-        (logs / "openmc.stdout").open("w") as stdout,
-        (logs / "openmc.stderr").open("w") as stderr,
-    ):
-        for command in commands:
+    for phase, command in zip(operations, commands):
+        log_phase = phase.replace("-", "_")
+        with (
+            (logs / f"openmc_{log_phase}.stdout").open("w") as stdout,
+            (logs / f"openmc_{log_phase}.stderr").open("w") as stderr,
+        ):
             subprocess.run(
                 command,
                 cwd=model.parent,

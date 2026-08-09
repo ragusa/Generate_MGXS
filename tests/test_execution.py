@@ -29,7 +29,10 @@ def fake_openmc(path: Path, behavior="success"):
             path,
             "import sys\n"
             "if sys.argv[1] == '-c': print('0.15.0')\n"
-            "else: raise SystemExit(7)\n",
+            "else:\n"
+            "    print('failure stdout before exit', flush=True)\n"
+            "    print('failure stderr before exit', file=sys.stderr, flush=True)\n"
+            "    raise SystemExit(7)\n",
         )
     if behavior == "timeout":
         return executable_script(path, "import time; time.sleep(5)\n")
@@ -47,6 +50,8 @@ if sys.argv[1] == "-c":
     raise SystemExit(0)
 cwd = Path.cwd()
 operation = sys.argv[2]
+print(f"{{operation}} stdout", flush=True)
+print(f"{{operation}} stderr", file=sys.stderr, flush=True)
 if operation == "run":
     (cwd / "statepoint.2.h5").write_bytes(b"fixture")
 elif operation == "process":
@@ -84,8 +89,55 @@ def test_openmc_success_and_required_outputs(one_case, tmp_path):
 
     assert result == run / "openmc/mgxs.h5"
     assert not (run / "opensn").exists()
-    assert (run / "logs/openmc.stdout").is_file()
+    assert (run / "logs/openmc_run.stdout").read_text() == "run stdout\n"
+    assert (run / "logs/openmc_run.stderr").read_text() == "run stderr\n"
+    assert (run / "logs/openmc_process.stdout").read_text() == "process stdout\n"
+    assert (run / "logs/openmc_process.stderr").read_text() == "process stderr\n"
     assert (run / "diagnostics/mgxs_uncertainty.json").is_file()
+
+
+def test_openmc_separate_phase_calls_preserve_each_others_logs(one_case, tmp_path):
+    run = prepare(one_case, tmp_path / "run", solvers=("openmc",))
+    cross_sections = tmp_path / "cross_sections.xml"
+    cross_sections.write_text("<cross_sections/>")
+    executable = fake_openmc(tmp_path / "openmc")
+
+    run_openmc(
+        run,
+        cross_sections=cross_sections,
+        python_executable=executable,
+        operation="run",
+    )
+    run_logs = {
+        suffix: (run / f"logs/openmc_run.{suffix}").read_text()
+        for suffix in ("stdout", "stderr")
+    }
+
+    run_openmc(
+        run,
+        cross_sections=cross_sections,
+        python_executable=executable,
+        operation="process",
+    )
+    assert {
+        suffix: (run / f"logs/openmc_run.{suffix}").read_text()
+        for suffix in ("stdout", "stderr")
+    } == run_logs
+    process_logs = {
+        suffix: (run / f"logs/openmc_process.{suffix}").read_text()
+        for suffix in ("stdout", "stderr")
+    }
+
+    run_openmc(
+        run,
+        cross_sections=cross_sections,
+        python_executable=executable,
+        operation="run",
+    )
+    assert {
+        suffix: (run / f"logs/openmc_process.{suffix}").read_text()
+        for suffix in ("stdout", "stderr")
+    } == process_logs
 
 
 def test_openmc_nonzero_exit(one_case, tmp_path):
@@ -99,6 +151,13 @@ def test_openmc_nonzero_exit(one_case, tmp_path):
             cross_sections=data,
             python_executable=fake_openmc(tmp_path / "bad", "failure"),
         )
+
+    assert "failure stdout before exit" in (
+        run / "logs/openmc_run.stdout"
+    ).read_text()
+    assert "failure stderr before exit" in (
+        run / "logs/openmc_run.stderr"
+    ).read_text()
 
 
 def test_openmc_timeout(one_case, tmp_path):
