@@ -7,6 +7,7 @@ import subprocess
 import pytest
 
 from generate_mgxs import prepare, run_openmc, run_opensn
+from generate_mgxs.opensn import _convergence
 from conftest import (
     OPENMC_DATA,
     OPENMC_PYTHON,
@@ -245,6 +246,23 @@ def test_opensn_success_requires_parsed_convergence(one_case, tmp_path):
     assert result.residual == pytest.approx(1e-9)
 
 
+def test_opensn_requires_each_independent_domain_to_converge():
+    """One successful material cannot conceal another domain's failed solve."""
+    output = (
+        "GENERATE_MGXS_DOMAIN_BEGIN target\n"
+        "Linear Iteration 3 Residual 1.0e-10 status = converged\n"
+        "GENERATE_MGXS_DOMAIN_END target\n"
+        "GENERATE_MGXS_DOMAIN_BEGIN moderator\n"
+        "Linear Iteration 50 Residual 2.0e-7 status = not converged\n"
+        "GENERATE_MGXS_DOMAIN_END moderator\n"
+    )
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        # JSON key sorting may differ from execution order; domain validation
+        # must remain order-independent.
+        _convergence(output, 1.0e-8, 50, ("moderator", "target"))
+
+
 def test_opensn_zero_return_nonconverged_is_rejected(one_case, tmp_path):
     """Meeting neither tolerance nor explicit status is a scientific failure."""
     run = prepared_fake_opensn(one_case, tmp_path)
@@ -350,5 +368,6 @@ def test_generated_two_material_opensn_executes(two_case, tmp_path):
 
     document = json.loads((run / "opensn/opensn_result.json").read_text())
     assert document["domains"]["target"]["block"] == 0
-    assert document["domains"]["target"]["volume_cm3"] == pytest.approx(0.064)
-    assert document["domains"]["moderator"]["block"] == 1
+    assert document["domains"]["target"]["volume_cm3"] == pytest.approx(8.0)
+    assert document["domains"]["moderator"]["block"] == 0
+    assert document["domains"]["moderator"]["volume_cm3"] == pytest.approx(8.0)

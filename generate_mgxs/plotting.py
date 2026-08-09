@@ -432,11 +432,26 @@ def plot_mgxs(
     # All reaction-rate vectors below share macroscopic cross-section units and
     # can therefore be compared on one physical-energy axis.
     figure, axis = plt.subplots()
-    axis.stairs(mgxs.total, plotting_bounds, label="Total")
-    axis.stairs(mgxs.absorption, plotting_bounds, label="Absorption")
+    vectors = [
+        ("Total", mgxs.total),
+        ("Absorption", mgxs.absorption),
+    ]
     if fissionable:
-        axis.stairs(mgxs.fission, plotting_bounds, label="Fission")
-        axis.stairs(mgxs.nu_fission, plotting_bounds, label="Nu-fission")
+        vectors.extend(
+            (
+                ("Fission", mgxs.fission),
+                ("Nu-fission", mgxs.nu_fission),
+            )
+        )
+    for label, values in vectors:
+        values_plot = np.insert(values, 0, values[0])
+        axis.semilogx(
+            plotting_bounds,
+            values_plot,
+            drawstyle="steps",
+            linewidth=1,
+            label=label,
+        )
     axis.set_xscale("log")
     axis.set_xlabel("Energy [eV]")
     axis.set_ylabel("Cross section [cm^-1]")

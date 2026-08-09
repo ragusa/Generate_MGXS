@@ -190,12 +190,6 @@ class Material:
         self.thermal_scattering = thermal_scattering
         self.role = role
 
-    @property
-    def opensn_block(self) -> int:
-        """Return the block fixed by the supported target/moderator geometry."""
-        return 1 if self.role == "moderator" else 0
-
-
 class Case:
     """One independently preparable fixed-source OpenMC/OpenSn case."""
 
@@ -212,9 +206,6 @@ class Case:
         boundaries=("reflective",) * 6,
         particles_per_batch: int = 25_000,
         batches: int = 40,
-        mesh_max_width_cm=(1.0, 1.0, 1.0),
-        num_polar: int = 4,
-        num_azimuthal: int = 8,
         scattering_order: int = 3,
         gmres_tolerance: float = 1.0e-10,
         gmres_max_iterations: int = 1200,
@@ -295,9 +286,6 @@ class Case:
             particles_per_batch, "particles_per_batch", minimum=1
         )
         self.batches = _integer(batches, "batches", minimum=1)
-        self.mesh_max_width_cm = self._dimensions(mesh_max_width_cm, "mesh widths")
-        self.num_polar = _integer(num_polar, "num_polar", minimum=1)
-        self.num_azimuthal = _integer(num_azimuthal, "num_azimuthal", minimum=1)
         self.scattering_order = _integer(scattering_order, "scattering_order", minimum=0)
         self.gmres_tolerance = _positive_float(gmres_tolerance, "gmres_tolerance")
         self.gmres_max_iterations = _integer(
@@ -391,7 +379,6 @@ def _material_records(case: Case) -> list[dict]:
             "thermal_scattering": material.thermal_scattering,
             "role": material.role,
             "openmc_id": openmc_ids[material.logical_name],
-            "opensn_block": material.opensn_block,
         }
         for material in case.materials
     ]
@@ -410,9 +397,6 @@ def _jsonable_case(case: Case) -> dict:
         "particles_per_batch": case.particles_per_batch,
         "batches": case.batches,
         "total_histories": case.total_histories,
-        "mesh_max_width_cm": case.mesh_max_width_cm,
-        "num_polar": case.num_polar,
-        "num_azimuthal": case.num_azimuthal,
         "scattering_order": case.scattering_order,
         "gmres_tolerance": case.gmres_tolerance,
         "gmres_max_iterations": case.gmres_max_iterations,

@@ -69,18 +69,24 @@ def test_opensn_input_is_scientifically_readable(one_case, tmp_path):
     for fact in (
         "MGXS_HDF5",
         "logical_name",
-        "opensn_block",
-        "mesh_max_width_cm",
-        "num_polar",
+        "cube_side_cm",
+        "cells_per_axis",
+        "cell_count",
+        "volume_cm3",
+        "n_polar",
+        "n_azimuthal",
+        "angular_directions",
         "scattering_order",
         "gmres_tolerance",
         "gmres_restart",
-        "source_volume_cm3",
     ):
         assert fact in text
 
     assert "LoadFromOpenMC" in text
     assert "SOURCE_PROBABILITIES_ASCENDING[::-1]" in text
+    assert '/ VERIFICATION["volume_cm3"]' in text
+    assert 'source_strength_high_to_low.sum() * VERIFICATION["volume_cm3"]' in text
+    assert "flux_high_to_low[::-1]" in text
     assert text.index("OPENSN_NUMERICAL_SETTINGS") < text.index("ENERGY_BOUNDS_EV_ASCENDING =")
 
 
@@ -95,6 +101,19 @@ def _literal_assignment(text, name):
             return ast.literal_eval(statement.value)
 
     raise AssertionError(f"missing generated assignment {name}")
+
+
+def _array_literal_assignment(text, name):
+    """Read the literal passed to a generated top-level np.asarray call."""
+    tree = ast.parse(text)
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in statement.targets
+        ):
+            return ast.literal_eval(statement.value.args[0])
+
+    raise AssertionError(f"missing generated array assignment {name}")
 
 
 def test_openmc_and_opensn_sources_share_one_generated_authority(tmp_path):
@@ -169,14 +188,70 @@ def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, t
     assert "MGXS_HDF5 = RUN_DIRECTORY / \"openmc\" / \"mgxs.h5\"" in text
 
 
-def test_two_material_mapping_is_visible_and_order_independent(two_case, tmp_path):
-    """Target block 0 and moderator block 1 cannot depend on input tuple order."""
+def test_two_material_domains_are_verified_independently(two_case, tmp_path):
+    """Input order cannot couple target and moderator in the verification solve."""
     text = (prepare(two_case, tmp_path / "run") / "opensn/input.py").read_text()
+    materials = _literal_assignment(text, "MATERIALS")
 
-    assert text.index("'logical_name': 'moderator'") < text.index("'logical_name': 'target'")
-    assert "'opensn_block': 1" in text
-    assert "'opensn_block': 0" in text
-    assert "grid.SetBlockIDFromLogicalVolume(target_volume, 0, True)" in text
+    assert [item["logical_name"] for item in materials] == ["moderator", "target"]
+    assert "opensn_block" not in text
+    assert "grid.SetUniformBlockID(0)" in text
+    assert 'xs_map=[{"block_ids": [0], "xs": cross_sections}]' in text
+    assert 'for material in CONFIG["materials"]' in text
+    assert 'str(MGXS_HDF5), logical_name, material["temperature_k"]' in text
+
+
+def test_fixed_opensn_verifier_is_independent_of_case_size_and_group_count(
+    tmp_path
+):
+    """OpenSn cost is fixed at eight cells/eight directions, even for SHEM-361."""
+    from examples.be9.case import CASE as be9
+
+    hdpe = Material(
+        "hdpe",
+        "HDPE",
+        0.955,
+        (("H1", 0.667), ("C12", 0.333)),
+        thermal_scattering=("c_H_in_CH2",),
+    )
+    hdpe_shem_like = Case(
+        name="hdpe_shem_like",
+        materials=(hdpe,),
+        energy_bounds_ev=tuple(np.linspace(0.0, 2.0e7, 362)),
+        source_kind="uniform_energy",
+        target_dimensions_cm=(20.0, 30.0, 400.0),
+        scattering_order=3,
+    )
+
+    for case in (be9, hdpe_shem_like):
+        text = (prepare(case, tmp_path / case.name) / "opensn/input.py").read_text()
+        verification = _literal_assignment(text, "VERIFICATION")
+        boundaries = _literal_assignment(text, "REFLECTING_BOUNDARIES")
+
+        assert verification == {
+            "cube_side_cm": 2.0,
+            "cells_per_axis": 2,
+            "cell_count": 8,
+            "volume_cm3": 8.0,
+            "n_polar": 2,
+            "n_azimuthal": 4,
+            "angular_directions": 8,
+            "scattering_order": 0,
+        }
+        assert len(boundaries) == 6
+        assert {item["type"] for item in boundaries} == {"reflecting"}
+        assert "target_dimensions_cm" not in text
+        assert "outer_dimensions_cm" not in text
+        assert "mesh_max_width_cm" not in text
+
+    shem_text = (
+        tmp_path / hdpe_shem_like.name / "opensn" / "input.py"
+    ).read_text()
+    generated_bounds = _array_literal_assignment(
+        shem_text, "ENERGY_BOUNDS_EV_ASCENDING"
+    )
+    assert len(generated_bounds) - 1 == 361
+    assert generated_bounds[0] == 0.0
 
 
 def test_prepare_writes_only_nonempty_scientific_directories(one_case, tmp_path):

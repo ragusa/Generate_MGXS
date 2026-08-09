@@ -44,10 +44,10 @@ CASE = Case(
     watt_b_per_mev=2.249,
     target_dimensions_cm=(0.4, 0.4, 0.4),
     outer_dimensions_cm=(1.5, 1.5, 1.5),
-    mesh_max_width_cm=(1.0, 1.0, 0.5),
     # The seed's 10,000,000 total histories are distributed over 40 batches.
     particles_per_batch=250_000,
     batches=40,
+    # OpenMC preserves P0--P3 MGXS; the independent OpenSn verifier uses P0.
     scattering_order=3,
     gmres_tolerance=1.0e-9,
     gmres_max_iterations=300,

@@ -39,7 +39,9 @@ plot_mgxs(target_xs, output_directory=run_path / "plots")
 plot_mgxs(moderator_xs, output_directory=run_path / "plots")
 
 
-# --- OpenSn execution and result summary ---------------------------------
+# --- Independent OpenSn domain verification and result summary ------------
+# UO2 and HDPE are each solved alone in the same fixed reflected 8-cell cube;
+# the verifier does not reconstruct or couple the OpenMC target/moderator mesh.
 opensn = run_opensn(run_path, executable=os.environ["OPENSN_CONSOLE"])
 
 print(openmc_result.values.sum(), target_xs.logical_domain, moderator_xs.logical_domain)

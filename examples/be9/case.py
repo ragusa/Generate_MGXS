@@ -26,10 +26,10 @@ CASE = Case(
     # Group probabilities are derived from this one physical source definition.
     source_kind="uniform_energy",
     target_dimensions_cm=(2.0, 2.0, 100.0),
-    mesh_max_width_cm=(1.0, 1.0, 50.0),
     # OpenMC histories = batches * particles_per_batch = 1,000,000.
     particles_per_batch=25_000,
     batches=40,
+    # OpenMC preserves P0--P3 MGXS; the independent OpenSn verifier uses P0.
     scattering_order=3,
     gmres_tolerance=1.0e-10,
     gmres_max_iterations=1200,

@@ -41,7 +41,10 @@ plot_mgxs(mgxs, output_directory=run_path / "plots")
 direct = solve_infinite_medium(mgxs, CASE.source_probabilities, CASE.source_volume_cm3)
 
 
-# --- OpenSn execution -----------------------------------------------------
+# --- OpenSn verification --------------------------------------------------
+# OpenSn independently places Be-9 in a fixed reflected 8-cell cube. It does
+# not reproduce the long OpenMC tally geometry and uses P0 for this scalar-flux
+# comparison.
 opensn = run_opensn(run_path, executable=os.environ["OPENSN_CONSOLE"])
 
 

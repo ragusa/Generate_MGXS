@@ -401,7 +401,10 @@ def test_zero_energy_matrix_spans_full_range_and_preserves_orientation():
     with pytest.warns(UserWarning, match="using 1e-5 eV for logarithmic plotting only"):
         figures = plot_mgxs(mgxs)
 
-    vector_edges = figures["cross_sections"].axes[0].patches[0].get_data().edges
+    vector_edges = labelled_line(
+        figures["cross_sections"].axes[0],
+        "Total",
+    ).get_xdata()
     energy_plotting_bounds = np.array([1.0e-5, 1.0, 1.0e8])
     np.testing.assert_array_equal(vector_edges, energy_plotting_bounds)
 
@@ -449,7 +452,10 @@ def test_positive_energy_boundaries_are_unchanged_and_do_not_warn():
         spectrum_figures["flux_spectrum"].axes[0],
         "OpenMC",
     ).get_xdata()
-    mgxs_edges = mgxs_figures["cross_sections"].axes[0].patches[0].get_data().edges
+    mgxs_edges = labelled_line(
+        mgxs_figures["cross_sections"].axes[0],
+        "Total",
+    ).get_xdata()
     np.testing.assert_array_equal(spectrum_edges, direct.energy_bounds_ev)
     np.testing.assert_array_equal(mgxs_edges, mgxs.energy_bounds_ev)
 
@@ -469,8 +475,18 @@ def test_nonfissionable_plot_uses_energy_edges_and_requested_scatter_orientation
 
     assert set(figures) == {"cross_sections", "scatter_p1"}
     vector_axis = figures["cross_sections"].axes[0]
-    plotted_edges = np.unique(vector_axis.patches[0].get_path().vertices[:, 0])
-    np.testing.assert_array_equal(plotted_edges, mgxs.energy_bounds_ev)
+    for label, values in (("Total", mgxs.total), ("Absorption", mgxs.absorption)):
+        line = labelled_line(vector_axis, label)
+        np.testing.assert_array_equal(line.get_xdata(), mgxs.energy_bounds_ev)
+        np.testing.assert_array_equal(
+            line.get_ydata(),
+            np.insert(values, 0, values[0]),
+        )
+        assert line.get_ydata()[0] == line.get_ydata()[1]
+        assert line.get_drawstyle() == "steps"
+        assert line.get_linewidth() == pytest.approx(1.0)
+    assert vector_axis.get_xscale() == "log"
+    assert vector_axis.get_yscale() == "linear"
 
     matrix_axis = figures["scatter_p1"].axes[0]
     mesh = matrix_axis.collections[0]
@@ -494,6 +510,43 @@ def test_nonfissionable_plot_uses_energy_edges_and_requested_scatter_orientation
 
     for name, values in original.items():
         np.testing.assert_array_equal(getattr(mgxs, name), values)
+
+    plt.close("all")
+
+
+def test_fissionable_mgxs_vectors_use_explicit_step_line_data_without_mutation():
+    """All cross-section vectors start horizontally at their first group value."""
+    mgxs = synthetic_mgxs(fissionable=True)
+    expected = {
+        "Total": mgxs.total.copy(),
+        "Absorption": mgxs.absorption.copy(),
+        "Fission": mgxs.fission.copy(),
+        "Nu-fission": mgxs.nu_fission.copy(),
+    }
+    original_bounds = mgxs.energy_bounds_ev.copy()
+
+    figures = plot_mgxs(mgxs)
+    axis = figures["cross_sections"].axes[0]
+
+    assert {line.get_label() for line in axis.lines} == set(expected)
+    for label, values in expected.items():
+        line = labelled_line(axis, label)
+        np.testing.assert_array_equal(line.get_xdata(), original_bounds)
+        np.testing.assert_array_equal(
+            line.get_ydata(),
+            np.insert(values, 0, values[0]),
+        )
+        assert line.get_ydata()[0] == line.get_ydata()[1]
+        assert line.get_drawstyle() == "steps"
+        assert line.get_linewidth() == pytest.approx(1.0)
+
+    assert axis.get_xscale() == "log"
+    assert axis.get_yscale() == "linear"
+    np.testing.assert_array_equal(mgxs.energy_bounds_ev, original_bounds)
+    np.testing.assert_array_equal(mgxs.total, expected["Total"])
+    np.testing.assert_array_equal(mgxs.absorption, expected["Absorption"])
+    np.testing.assert_array_equal(mgxs.fission, expected["Fission"])
+    np.testing.assert_array_equal(mgxs.nu_fission, expected["Nu-fission"])
 
     plt.close("all")
 

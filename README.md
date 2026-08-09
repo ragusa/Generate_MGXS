@@ -117,3 +117,18 @@ Their run scripts use `OPENMC_CROSS_SECTIONS` and `OPENSN_CONSOLE`; no
 machine-specific path is embedded. The generated Python files are readable
 solver inputs, not wrappers around hidden configuration or in-memory `Case`
 objects. OpenMC MGXS HDF5 is the only supported cross-section handoff.
+
+## OpenSn verification scope
+
+Generated OpenSn input is intentionally a verification calculation, not a
+second model of the OpenMC geometry. Each material domain in openmc/mgxs.h5
+is loaded and solved independently in a homogeneous, all-reflecting 2 cm cube
+with 2 cells per axis (8 cells total). The fixed
+GLCProductQuadrature3DXYZ(2, 4) supplies 8 directions, and P0 scattering is
+sufficient for the isotropic infinite-homogeneous scalar-flux comparison.
+
+OpenMC target/moderator dimensions and boundary choices therefore do not
+control OpenSn cost. scattering_order remains a Case setting because it
+controls the MGXS moments produced by OpenMC; the OpenSn verifier deliberately
+uses only P0. The only case-specific OpenSn controls are GMRES tolerance,
+maximum iterations, and restart.

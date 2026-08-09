@@ -161,15 +161,13 @@ def test_invalid_composition_identifiers_are_rejected(identifier):
 
 
 def test_one_and_two_material_mapping_are_physical(one_case, two_case):
-    """Physical roles, never tuple position, determine OpenSn blocks."""
-    assert [(x.logical_name, x.opensn_block) for x in one_case.materials] == [("one", 0)]
+    """Physical roles, never tuple position, determine OpenMC geometry domains."""
+    assert [x.logical_name for x in one_case.materials] == ["one"]
     assert one_case.geometry_type == "homogeneous"
 
-    # Supply moderator first: roles, not tuple positions, still establish blocks.
+    # Supply moderator first: roles, not tuple positions, still establish geometry.
     assert [x.role for x in two_case.materials] == ["moderator", "target"]
-    assert {x.logical_name: x.opensn_block for x in two_case.materials} == {
-        "moderator": 1, "target": 0,
-    }
+    assert two_case.geometry_type == "moderated_target"
 
 
 def test_material_constructor_has_no_solver_ids():
@@ -180,6 +178,17 @@ def test_material_constructor_has_no_solver_ids():
     assert "opensn_block" not in parameters
 
 
+def test_case_exposes_only_genuine_opensn_convergence_controls():
+    """Fixed verification mesh/quadrature choices are not misleading Case knobs."""
+    import inspect
+
+    parameters = inspect.signature(Case).parameters
+    for removed in ("mesh_max_width_cm", "num_polar", "num_azimuthal"):
+        assert removed not in parameters
+    # This still governs the moments generated and retained by OpenMC MGXS.
+    assert "scattering_order" in parameters
+
+
 def test_geometry_and_solver_controls_are_validated():
     common = dict(
         name="case", materials=(material(),), energy_bounds_ev=(1.0, 2.0),
@@ -187,11 +196,8 @@ def test_geometry_and_solver_controls_are_validated():
     )
     for field, value, message in (
         ("target_dimensions_cm", (1.0, np.inf, 1.0), "target dimensions"),
-        ("mesh_max_width_cm", (1.0, 0.0, 1.0), "mesh widths"),
         ("particles_per_batch", True, "particles_per_batch"),
         ("batches", 0, "batches"),
-        ("num_polar", 0, "num_polar"),
-        ("num_azimuthal", True, "num_azimuthal"),
         ("scattering_order", -1, "scattering_order"),
         ("gmres_tolerance", np.nan, "gmres_tolerance"),
         ("gmres_max_iterations", 0, "gmres_max_iterations"),
