@@ -1,11 +1,19 @@
+import ast
+from importlib import resources
 import json
 from pathlib import Path
-import ast
 
 import numpy as np
 import pytest
 
-from generate_mgxs import Case, Spectrum, load_openmc_result, load_opensn_result, prepare
+from generate_mgxs import (
+    Case,
+    Material,
+    Spectrum,
+    load_openmc_result,
+    load_opensn_result,
+    prepare,
+)
 from conftest import EVIDENCE, material
 
 
@@ -13,22 +21,64 @@ def test_generation_is_deterministic(one_case, tmp_path):
     """The same scientific case must produce byte-identical independent inputs."""
     first = prepare(one_case, tmp_path / "first")
     second = prepare(one_case, tmp_path / "second")
-    assert (first / "openmc/model.py").read_text() == (second / "openmc/model.py").read_text()
-    assert (first / "opensn/input.py").read_text() == (second / "opensn/input.py").read_text()
+
+    assert (first / "openmc/model.py").read_text() == (
+        second / "openmc/model.py"
+    ).read_text()
+    assert (first / "opensn/input.py").read_text() == (
+        second / "opensn/input.py"
+    ).read_text()
+
+
+def test_solver_templates_are_readable_package_data():
+    """Both plain templates must be available through installed package resources."""
+    template_root = resources.files("generate_mgxs").joinpath("templates")
+
+    openmc_template = template_root.joinpath("openmc_model.py.template").read_text()
+    opensn_template = template_root.joinpath("opensn_input.py.template").read_text()
+
+    assert "def build_model" in openmc_template
+    assert "material.add_element" in openmc_template
+    assert "SteadyStateSourceSolver" in opensn_template
+    assert "SOURCE_PROBABILITIES_ASCENDING[::-1]" in opensn_template
 
 
 def test_openmc_input_is_scientifically_readable(one_case, tmp_path):
     text = (prepare(one_case, tmp_path / "run") / "openmc/model.py").read_text()
-    for fact in ("H1", "density_g_cm3", "temperature_k", "target_dimensions_cm", "PHYSICAL_SOURCE", "ENERGY_BOUNDS_EV", "particles_per_batch", "batches", "scattering_order"):
+
+    for fact in (
+        "H1",
+        "density_g_cm3",
+        "temperature_k",
+        "target_dimensions_cm",
+        "PHYSICAL_SOURCE",
+        "ENERGY_BOUNDS_EV",
+        "particles_per_batch",
+        "batches",
+        "scattering_order",
+    ):
         assert fact in text
+
     assert "openmc.mgxs.Library" in text
     assert text.index("OPENMC_HISTORY_SETTINGS") < text.index("ENERGY_BOUNDS_EV =")
 
 
 def test_opensn_input_is_scientifically_readable(one_case, tmp_path):
     text = (prepare(one_case, tmp_path / "run") / "opensn/input.py").read_text()
-    for fact in ("MGXS_HDF5", "logical_name", "opensn_block", "mesh_max_width_cm", "num_polar", "scattering_order", "gmres_tolerance", "gmres_restart", "source_volume_cm3"):
+
+    for fact in (
+        "MGXS_HDF5",
+        "logical_name",
+        "opensn_block",
+        "mesh_max_width_cm",
+        "num_polar",
+        "scattering_order",
+        "gmres_tolerance",
+        "gmres_restart",
+        "source_volume_cm3",
+    ):
         assert fact in text
+
     assert "LoadFromOpenMC" in text
     assert "SOURCE_PROBABILITIES_ASCENDING[::-1]" in text
     assert text.index("OPENSN_NUMERICAL_SETTINGS") < text.index("ENERGY_BOUNDS_EV_ASCENDING =")
@@ -39,9 +89,11 @@ def _literal_assignment(text, name):
     tree = ast.parse(text)
     for statement in tree.body:
         if isinstance(statement, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == name for target in statement.targets
+            isinstance(target, ast.Name) and target.id == name
+            for target in statement.targets
         ):
             return ast.literal_eval(statement.value)
+
     raise AssertionError(f"missing generated assignment {name}")
 
 
@@ -49,12 +101,21 @@ def test_openmc_and_opensn_sources_share_one_generated_authority(tmp_path):
     """Both solver inputs must serialize the same Watt parameters, never a copied vector."""
     bounds = (1.0e-5, 1.0e6, 2.0e7)
     case = Case(
-        name="watt", materials=(material(),), energy_bounds_ev=bounds,
-        source_kind="watt", watt_a_mev=0.988, watt_b_per_mev=2.249,
+        name="watt",
+        materials=(material(),),
+        energy_bounds_ev=bounds,
+        source_kind="watt",
+        watt_a_mev=0.988,
+        watt_b_per_mev=2.249,
         target_dimensions_cm=(1.0, 1.0, 1.0),
     )
+
     run = prepare(case, tmp_path / "watt")
-    texts = [(run / relative).read_text() for relative in ("openmc/model.py", "opensn/input.py")]
+    texts = [
+        (run / relative).read_text()
+        for relative in ("openmc/model.py", "opensn/input.py")
+    ]
+
     for text in texts:
         assert _literal_assignment(text, "PHYSICAL_SOURCE") == case.source_definition
         assert "SOURCE_PROBABILITIES_ASCENDING = source_probabilities()" in text
@@ -62,9 +123,47 @@ def test_openmc_and_opensn_sources_share_one_generated_authority(tmp_path):
         assert repr(case.source_probabilities) not in text
 
 
+def test_generated_openmc_marks_nuclides_and_natural_elements(tmp_path):
+    """Generated materials must visibly delegate natural expansion to OpenMC."""
+    material_definition = Material(
+        "steel",
+        "simple steel",
+        7.8,
+        (("Fe", 0.98), ("C12", 0.02)),
+    )
+    case = Case(
+        name="steel",
+        materials=(material_definition,),
+        energy_bounds_ev=(1.0, 2.0),
+        source_kind="uniform_energy",
+        target_dimensions_cm=(1.0, 1.0, 1.0),
+    )
+
+    text = (prepare(case, tmp_path / "steel") / "openmc/model.py").read_text()
+    materials = _literal_assignment(text, "MATERIALS")
+    components = materials[0]["composition"]
+
+    assert components[0] == {
+        "identifier": "Fe",
+        "kind": "element",
+        "atom_fraction": 0.98,
+    }
+    assert components[1] == {
+        "identifier": "C12",
+        "kind": "nuclide",
+        "atom_fraction": 0.02,
+    }
+    assert "material.add_element" in text
+    assert "material.add_nuclide" in text
+
+
 def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, tmp_path):
     run = prepare(one_case, tmp_path / "run")
-    text = (run / "openmc/model.py").read_text() + (run / "opensn/input.py").read_text()
+    text = (
+        (run / "openmc/model.py").read_text()
+        + (run / "opensn/input.py").read_text()
+    )
+
     assert "/home/" not in text
     assert ".cxs" not in text.lower()
     assert "MGXS_HDF5 = RUN_DIRECTORY / \"openmc\" / \"mgxs.h5\"" in text
@@ -73,6 +172,7 @@ def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, t
 def test_two_material_mapping_is_visible_and_order_independent(two_case, tmp_path):
     """Target block 0 and moderator block 1 cannot depend on input tuple order."""
     text = (prepare(two_case, tmp_path / "run") / "opensn/input.py").read_text()
+
     assert text.index("'logical_name': 'moderator'") < text.index("'logical_name': 'target'")
     assert "'opensn_block': 1" in text
     assert "'opensn_block': 0" in text
@@ -81,22 +181,34 @@ def test_two_material_mapping_is_visible_and_order_independent(two_case, tmp_pat
 
 def test_prepare_writes_only_nonempty_scientific_directories(one_case, tmp_path):
     run = prepare(one_case, tmp_path / "run")
-    assert {path.relative_to(run).as_posix() for path in run.rglob("*") if path.is_file()} == {
+    generated_files = {
+        path.relative_to(run).as_posix()
+        for path in run.rglob("*")
+        if path.is_file()
+    }
+
+    assert generated_files == {
         "_metadata/run.json", "openmc/model.py", "opensn/input.py",
     }
+
     (run / "notes.md").write_text("my notes")
     prepare(one_case, run)
+
     assert (run / "notes.md").read_text() == "my notes"
 
 
 def test_minimal_metadata_has_case_and_input_hashes(one_case, tmp_path):
     run = prepare(one_case, tmp_path / "run")
     metadata = json.loads((run / "_metadata/run.json").read_text())
+
     assert metadata["case"]["name"] == one_case.name
     assert metadata["case"]["source_volume_cm3"] == 1.0
     assert metadata["case"]["particles_per_batch"] == 10
     assert metadata["case"]["total_histories"] == 20
-    assert {item["path"] for item in metadata["artifacts"]} == {"openmc/model.py", "opensn/input.py"}
+    assert {item["path"] for item in metadata["artifacts"]} == {
+        "openmc/model.py",
+        "opensn/input.py",
+    }
 
 
 def test_load_openmc_seed_preserves_standard_deviation():
@@ -127,12 +239,18 @@ def test_load_opensn_rejects_unknown_convergence(tmp_path):
 
 
 def test_be9_normalized_l1_regression():
+    """All three solvers retain the accepted normalized Be-9 spectra."""
     openmc = load_openmc_result(EVIDENCE / "be9_openmc_result.json")
     opensn = load_opensn_result(EVIDENCE / "be9_opensn_result.json").spectrum
     direct_data = json.loads((EVIDENCE / "be9_direct_result.json").read_text())
-    direct = Spectrum(np.asarray(direct_data["energy_bounds"]), np.asarray(direct_data["flux"]))
+    direct = Spectrum(
+        np.asarray(direct_data["energy_bounds"]),
+        np.asarray(direct_data["flux"]),
+    )
+
     openmc_l1 = np.linalg.norm(openmc.normalized - direct.normalized, 1)
     opensn_l1 = np.linalg.norm(opensn.normalized - direct.normalized, 1)
+
     assert openmc_l1 == pytest.approx(1.5125390210620065e-4, rel=2e-12)
     assert opensn_l1 == pytest.approx(6.345963571253652e-11, rel=2e-6)
 
@@ -144,8 +262,15 @@ def test_spectrum_rejects_wrong_boundary_count():
 
 def test_examples_show_the_complete_workflows():
     root = Path(__file__).parents[1]
-    be9 = (root / "examples/be9/case.py").read_text() + (root / "examples/be9/run.py").read_text()
-    moderated = (root / "examples/moderated/case.py").read_text() + (root / "examples/moderated/run.py").read_text()
+    be9 = (
+        (root / "examples/be9/case.py").read_text()
+        + (root / "examples/be9/run.py").read_text()
+    )
+    moderated = (
+        (root / "examples/moderated/case.py").read_text()
+        + (root / "examples/moderated/run.py").read_text()
+    )
+
     for name in ("prepare", "run_openmc", "load_mgxs", "solve_infinite_medium", "run_opensn"):
         assert name in be9
     for name in ("uo2_target", "hdpe_moderator", "run_openmc", "run_opensn"):
@@ -164,7 +289,9 @@ def test_prepare_does_not_execute_subprocesses(one_case, tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", unexpected)
     monkeypatch.setattr(subprocess, "Popen", unexpected)
+
     run = prepare(one_case, tmp_path / "prepared")
+
     assert (run / "openmc/model.py").is_file()
     assert (run / "opensn/input.py").is_file()
 

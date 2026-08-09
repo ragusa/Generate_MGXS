@@ -1,4 +1,4 @@
-"""Transparent OpenMC/OpenSn multigroup calculations."""
+"""Public API for transparent OpenMC/OpenSn multigroup calculations."""
 
 from .case import Case, Material, energy_bounds, prepare, source_probabilities
 from .direct import solve_infinite_medium

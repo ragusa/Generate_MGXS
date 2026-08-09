@@ -18,13 +18,16 @@ class Spectrum:
     def __init__(self, energy_bounds_ev, values, std_dev=None, logical_domain=None):
         bounds = _vector(energy_bounds_ev, "energy_bounds_ev")
         values = _vector(values, "values")
+
         if bounds.size != values.size + 1 or np.any(np.diff(bounds) <= 0.0):
             raise ValueError("spectrum boundaries must be ascending with G + 1 values")
+
         std = None
         if std_dev is not None:
             std = _vector(std_dev, "std_dev")
             if std.shape != values.shape or np.any(std < 0.0):
                 raise ValueError("standard deviations must be nonnegative and match values")
+
         self.energy_bounds_ev = bounds
         self.values = values
         self.std_dev = std
@@ -36,6 +39,7 @@ class Spectrum:
         total = float(np.sum(self.values))
         if total == 0.0:
             raise ValueError("cannot normalize a zero spectrum")
+
         return np.asarray(self.values) / total
 
 

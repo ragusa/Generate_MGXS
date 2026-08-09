@@ -32,6 +32,19 @@ export OPENSN_CONSOLE=/path/to/opensn-console
 export OPENSN_MPIEXEC=/path/to/opensn-mpiexec  # only needed for MPI
 ```
 
+Material composition uses one simple sequence for explicit nuclides and
+natural elements:
+
+```python
+be9 = Material("be9", "Be-9", 1.85, (("Be9", 1.0),))
+iron = Material("iron", "natural iron", 7.87, (("Fe", 1.0),))
+steel = Material("steel", "Fe-C", 7.8, (("Fe", 0.98), ("C", 0.02)))
+```
+
+A mass number selects an explicit nuclide; a bare symbol delegates natural
+isotope expansion to OpenMC. The package carries no periodic-table or natural-
+abundance database.
+
 For `run_dir=results/material_001`, the direct serial command contract is:
 
 ```bash

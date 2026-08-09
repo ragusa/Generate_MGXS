@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
+import re
 from typing import Literal
 
 import numpy as np
@@ -32,6 +33,13 @@ _LANL30_MEV = (
     6.14e-5, 1.67e-4, 4.54e-4, 1.235e-3, 3.35e-3, 9.12e-3, 2.48e-2,
     6.76e-2, 0.184, 0.303, 0.5, 0.823, 1.353, 1.738, 2.232, 2.865,
     3.68, 6.07, 7.79, 10.0, 12.0, 13.5, 15.0, 17.0,
+)
+
+# This is deliberately a naming rule, not a periodic-table database. OpenMC is
+# the scientific authority that expands natural elements and validates whether
+# a canonical element or nuclide is available in the configured nuclear data.
+_COMPOSITION_IDENTIFIER = re.compile(
+    r"^[A-Z][a-z]?(?:[1-9]\d*(?:_m[1-9]\d*)?)?$"
 )
 
 
@@ -79,12 +87,14 @@ def source_probabilities(
 ) -> tuple[float, ...]:
     """Integrate a physical source into ascending-energy group probabilities."""
     bounds = _ascending(bounds_ev, name="energy boundaries")
+
     if kind == "uniform_energy":
         masses = np.diff(bounds)
     elif kind == "watt":
         a_mev = _positive_float(a_mev, "Watt a_mev")
         b_per_mev = _positive_float(b_per_mev, "Watt b_per_mev")
         bounds_mev = bounds / 1.0e6
+
         # Fixed-order Gauss-Legendre integration makes generated cases
         # deterministic while accurately resolving the smooth Watt spectrum.
         nodes, weights = np.polynomial.legendre.leggauss(64)
@@ -98,12 +108,20 @@ def source_probabilities(
         masses = np.asarray(masses)
     else:
         raise ValueError("source kind must be 'uniform_energy' or 'watt'")
-    if not np.all(np.isfinite(masses)) or np.any(masses < 0.0) or masses.sum() <= 0.0:
+
+    if (
+        not np.all(np.isfinite(masses))
+        or np.any(masses < 0.0)
+        or masses.sum() <= 0.0
+    ):
         raise ValueError("source integration produced invalid group masses")
+
     masses /= masses.sum()
+
     # Close the probability vector exactly enough for downstream serialization;
     # the correction is roundoff-sized and is applied to a populated end group.
     masses[-1] += 1.0 - masses.sum()
+
     return tuple(float(value) for value in masses)
 
 
@@ -115,7 +133,7 @@ class Material:
         logical_name: str,
         name: str,
         density_g_cm3: float,
-        isotopes,
+        composition,
         temperature_k: float = 294.0,
         thermal_scattering=(),
         role: Literal["homogeneous", "target", "moderator"] = "homogeneous",
@@ -126,20 +144,40 @@ class Material:
             raise ValueError("material name cannot be empty")
         if role not in {"homogeneous", "target", "moderator"}:
             raise ValueError("material role must be homogeneous, target, or moderator")
+
         try:
-            composition = tuple((str(isotope), float(fraction)) for isotope, fraction in isotopes)
+            components = tuple(
+                (str(identifier), float(fraction))
+                for identifier, fraction in composition
+            )
         except (TypeError, ValueError) as error:
-            raise ValueError("material composition must contain isotope/fraction pairs") from error
-        if not composition or any(not isotope.strip() for isotope, _ in composition):
+            raise ValueError(
+                "material composition must contain identifier/fraction pairs"
+            ) from error
+
+        if not components:
             raise ValueError("material composition cannot be empty")
-        fractions = np.asarray([fraction for _, fraction in composition], dtype=float)
+        invalid = [
+            identifier
+            for identifier, _ in components
+            if not _COMPOSITION_IDENTIFIER.fullmatch(identifier)
+        ]
+        if invalid:
+            raise ValueError(
+                f"invalid material composition identifier {invalid[0]!r}"
+            )
+
+        fractions = np.asarray([fraction for _, fraction in components], dtype=float)
         if (
             not np.all(np.isfinite(fractions))
             or np.any(fractions < 0.0)
             or not np.any(fractions > 0.0)
             or not np.isclose(fractions.sum(), 1.0, rtol=0.0, atol=1.0e-12)
         ):
-            raise ValueError("material atom fractions must be finite, nonnegative, and sum to one")
+            raise ValueError(
+                "material atom fractions must be finite, nonnegative, and sum to one"
+            )
+
         thermal_scattering = tuple(str(table) for table in thermal_scattering)
         if any(not table.strip() for table in thermal_scattering):
             raise ValueError("thermal-scattering table names cannot be empty")
@@ -147,7 +185,7 @@ class Material:
         self.logical_name = logical_name
         self.name = name
         self.density_g_cm3 = _positive_float(density_g_cm3, "material density")
-        self.isotopes = composition
+        self.composition = components
         self.temperature_k = _positive_float(temperature_k, "material temperature")
         self.thermal_scattering = thermal_scattering
         self.role = role
@@ -187,11 +225,17 @@ class Case:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("case name cannot be empty")
         materials = tuple(materials)
-        if not materials or len(materials) > 2 or not all(isinstance(x, Material) for x in materials):
+        if (
+            not materials
+            or len(materials) > 2
+            or not all(isinstance(material, Material) for material in materials)
+        ):
             raise ValueError("a case requires one material or a target and moderator")
+
         logical_names = [material.logical_name for material in materials]
         if len(set(logical_names)) != len(logical_names):
             raise ValueError("logical material names must be unique")
+
         roles = {material.role for material in materials}
         if len(materials) == 1 and roles != {"homogeneous"}:
             raise ValueError("one material must have the homogeneous role")
@@ -203,9 +247,13 @@ class Case:
         ))
         if source_kind not in {"uniform_energy", "watt", "grouped"}:
             raise ValueError("source kind must be uniform_energy, watt, or grouped")
+
         watt_a_mev = _positive_float(watt_a_mev, "Watt a_mev")
         watt_b_per_mev = _positive_float(watt_b_per_mev, "Watt b_per_mev")
         grouped = None
+
+        # Only a grouped source owns an explicit probability vector. Uniform
+        # and Watt vectors are derived later from their physical definitions.
         if source_kind == "grouped":
             if source_probabilities is None:
                 raise ValueError("grouped source requires source_probabilities")
@@ -224,6 +272,7 @@ class Case:
         outer = None if outer_dimensions_cm is None else self._dimensions(
             outer_dimensions_cm, "outer dimensions"
         )
+
         if len(materials) == 2:
             if outer is None or any(outside <= inside for inside, outside in zip(target, outer)):
                 raise ValueError("moderated outer dimensions must strictly exceed target dimensions")
@@ -255,6 +304,7 @@ class Case:
             gmres_max_iterations, "gmres_max_iterations", minimum=1
         )
         self.gmres_restart = _integer(gmres_restart, "gmres_restart", minimum=1)
+
         self.watt_a_mev = watt_a_mev
         self.watt_b_per_mev = watt_b_per_mev
 
@@ -264,7 +314,10 @@ class Case:
             dimensions = tuple(float(value) for value in values)
         except (TypeError, ValueError) as error:
             raise ValueError(f"{name} must contain three finite positive values") from error
-        if len(dimensions) != 3 or any(not math.isfinite(x) or x <= 0.0 for x in dimensions):
+
+        if len(dimensions) != 3 or any(
+            not math.isfinite(value) or value <= 0.0 for value in dimensions
+        ):
             raise ValueError(f"{name} must contain three finite positive values")
         return dimensions
 
@@ -311,7 +364,7 @@ class Case:
 
 def _material_records(case: Case) -> list[dict]:
     # OpenMC IDs are serialization details, not physics. Sorting logical names
-    # makes them stable even when the caller supplies target/moderator in another order.
+    # makes them stable even when target/moderator input order changes.
     openmc_ids = {
         name: index for index, name in enumerate(
             sorted(material.logical_name for material in case.materials), start=1
@@ -322,7 +375,18 @@ def _material_records(case: Case) -> list[dict]:
             "logical_name": material.logical_name,
             "name": material.name,
             "density_g_cm3": material.density_g_cm3,
-            "isotopes": material.isotopes,
+            "composition": tuple(
+                {
+                    "identifier": identifier,
+                    "kind": (
+                        "nuclide"
+                        if any(char.isdigit() for char in identifier)
+                        else "element"
+                    ),
+                    "atom_fraction": atom_fraction,
+                }
+                for identifier, atom_fraction in material.composition
+            ),
             "temperature_k": material.temperature_k,
             "thermal_scattering": material.thermal_scattering,
             "role": material.role,
@@ -369,10 +433,12 @@ def _artifact(path: Path, root: Path) -> dict:
 def _update_run_metadata(run_directory: Path, **updates) -> None:
     path = run_directory / "_metadata" / "run.json"
     data = json.loads(path.read_text()) if path.exists() else {}
+
     if "artifacts" in updates:
         merged = {item["path"]: item for item in data.get("artifacts", [])}
         merged.update({item["path"]: item for item in updates["artifacts"]})
         updates["artifacts"] = [merged[name] for name in sorted(merged)]
+
     data.update(updates)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
@@ -385,13 +451,17 @@ def prepare(case: Case, run_directory) -> Path:
     from .openmc import _write_openmc_input
     from .opensn import _write_opensn_input
 
+    # Each prepared directory is self-contained; generation never depends on
+    # or updates shared campaign state.
     run = Path(run_directory).resolve()
     openmc_input = run / "openmc" / "model.py"
     opensn_input = run / "opensn" / "input.py"
     openmc_input.parent.mkdir(parents=True, exist_ok=True)
     opensn_input.parent.mkdir(parents=True, exist_ok=True)
+
     _write_openmc_input(case, openmc_input)
     _write_opensn_input(case, opensn_input)
+
     from . import __version__
 
     _update_run_metadata(

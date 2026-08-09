@@ -4,19 +4,25 @@ from generate_mgxs import Case, Material, energy_bounds
 
 
 BOUNDS_EV = energy_bounds("LANL30")
+
+
+# --- Moderator material ---------------------------------------------------
 HDPE = Material(
     logical_name="hdpe_moderator",
     name="HDPE moderator",
     density_g_cm3=0.955,
-    isotopes=(("H1", 0.667), ("C12", 0.3294702), ("C13", 0.0035298)),
+    composition=(("H1", 0.667), ("C12", 0.3294702), ("C13", 0.0035298)),
     thermal_scattering=("c_H_in_CH2",),
     role="moderator",
 )
+
+
+# --- Target material ------------------------------------------------------
 UO2 = Material(
     logical_name="uo2_target",
     name="UO2",
     density_g_cm3=10.96,
-    isotopes=(
+    composition=(
         ("O16", 0.665047665047665), ("O17", 0.000253000253000253),
         ("O18", 0.001367001367001367), ("U234", 0.00009000009000009),
         ("U235", 0.010124010124010123), ("U236", 0.000046000046000046),
@@ -25,6 +31,9 @@ UO2 = Material(
     thermal_scattering=("c_O_in_UO2", "c_U_in_UO2"),
     role="target",
 )
+
+
+# --- Complete moderated case ---------------------------------------------
 CASE = Case(
     name="uo2_in_hdpe",
     materials=(HDPE, UO2),  # ordering is deliberately unrelated to block assignment

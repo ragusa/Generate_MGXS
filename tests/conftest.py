@@ -23,7 +23,7 @@ def material(name="one", role="homogeneous"):
         logical_name=name,
         name=name,
         density_g_cm3=1.0,
-        isotopes=(("H1", 1.0),),
+        composition=(("H1", 1.0),),
         role=role,
     )
 

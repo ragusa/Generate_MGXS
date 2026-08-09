@@ -3,17 +3,25 @@
 from generate_mgxs import Case, Material, energy_bounds
 
 
+# --- Material and energy groups -------------------------------------------
+BE9 = Material(
+    logical_name="be9",
+    name="Be9",
+    density_g_cm3=1.85,
+    # A mass number denotes an explicit nuclide; bare symbols such as "Fe"
+    # would request OpenMC's natural-element expansion.
+    composition=(("Be9", 1.0),),
+    temperature_k=294.0,
+    thermal_scattering=("c_Be",),
+)
+
 BOUNDS_EV = energy_bounds("WIMS69")
+
+
+# --- Complete case definition ---------------------------------------------
 CASE = Case(
     name="be9",
-    materials=(Material(
-        logical_name="be9",
-        name="Be9",
-        density_g_cm3=1.85,
-        isotopes=(("Be9", 1.0),),
-        temperature_k=294.0,
-        thermal_scattering=("c_Be",),
-    ),),
+    materials=(BE9,),
     energy_bounds_ev=BOUNDS_EV,
     # Group probabilities are derived from this one physical source definition.
     source_kind="uniform_energy",

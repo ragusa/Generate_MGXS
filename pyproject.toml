@@ -17,7 +17,9 @@ test = ["pytest>=7"]
 [tool.setuptools.packages.find]
 include = ["generate_mgxs*"]
 
+[tool.setuptools.package-data]
+generate_mgxs = ["templates/*.template"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["opensn: requires the supplied OpenSn runtime"]
-
