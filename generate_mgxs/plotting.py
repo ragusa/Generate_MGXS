@@ -221,36 +221,71 @@ def _filename_stem(logical_domain: str) -> str:
 
 def _plot_group_matrix(
     values_gin_gout,
-    energy_bounds_ev,
     *,
     title: str,
     colorbar_label: str,
+    logarithmic_color=False,
 ):
-    """Plot a canonical ``[g_in, g_out]`` matrix against energy boundaries."""
+    """Plot a canonical ``[g_in, g_out]`` matrix in high-to-low group order."""
     import matplotlib.pyplot as plt
 
+    scientific_values = np.asarray(values_gin_gout)
+    if (
+        scientific_values.ndim != 2
+        or scientific_values.shape[0] != scientific_values.shape[1]
+    ):
+        raise ValueError("group matrix must be square")
+
+    groups = scientific_values.shape[0]
+    group_edges = np.arange(0.5, groups + 1.5)
+
+    # Canonical arrays are ascending in physical energy, whereas conventional
+    # multigroup index 1 denotes the highest-energy group. Reverse both energy
+    # axes in this plotting view only. The transpose maps incoming groups to
+    # Matplotlib's horizontal dimension and outgoing groups to its vertical one.
+    displayed_values = scientific_values[::-1, ::-1].T
+
+    norm = None
+    if logarithmic_color:
+        from matplotlib.colors import LogNorm
+
+        if np.any(scientific_values < 0.0):
+            raise ValueError("logarithmic matrix color requires nonnegative values")
+
+        # Mask nonpositive cells instead of taking log(data). The colorbar thus
+        # retains physical cross-section units and zero cells render blank.
+        displayed_values = np.ma.masked_less_equal(displayed_values, 0.0)
+        positive = scientific_values[scientific_values > 0.0]
+        if positive.size:
+            norm = LogNorm(
+                vmin=float(np.min(positive)),
+                vmax=float(np.max(positive)),
+            )
+            colorbar_label = f"{colorbar_label} (log scale)"
+
     figure, axis = plt.subplots()
-    plotting_bounds = _plot_energy_bounds(energy_bounds_ev)
-
-    # pcolormesh treats its first data index as vertical.  Transpose only this
-    # plotting view so x remains incoming energy and y remains outgoing energy;
-    # the canonical scientific array itself stays [g_in, g_out].
     mesh = axis.pcolormesh(
-        plotting_bounds,
-        plotting_bounds,
-        np.asarray(values_gin_gout).T,
+        group_edges,
+        group_edges,
+        displayed_values,
         shading="flat",
+        norm=norm,
     )
-    axis.set_xscale("log")
-    axis.set_yscale("log")
 
-    # Matrix displays follow the transport-review convention: incoming energy
-    # decreases from left to right, while outgoing energy increases upward.
-    # Invert only the x axis; the canonical [g_in, g_out] data are untouched.
-    axis.invert_xaxis()
-    axis.set_xlabel("Incoming energy [eV]")
-    axis.set_ylabel("Outgoing energy [eV]")
+    # Group number increases left-to-right for incoming groups and
+    # top-to-bottom for outgoing groups, placing high/high at top-left and
+    # low/low at bottom-right.
+    axis.invert_yaxis()
+    axis.set_xlabel("Incoming group")
+    axis.set_ylabel("Outgoing group")
     axis.set_title(title)
+
+    if groups <= 12:
+        ticks = np.arange(1, groups + 1)
+    else:
+        ticks = np.unique(np.rint(np.linspace(1, groups, 9)).astype(int))
+    axis.set_xticks(ticks)
+    axis.set_yticks(ticks)
 
     colorbar = figure.colorbar(mesh, ax=axis)
     colorbar.set_label(colorbar_label)
@@ -332,11 +367,12 @@ def plot_mgxs(
         figures["chi"] = figure
 
     for moment in moments:
+        scatter = mgxs.scatter[moment]
         figures[f"scatter_p{moment}"] = _plot_group_matrix(
-            mgxs.scatter[moment],
-            plotting_bounds,
+            scatter,
             title=f"{mgxs.logical_domain} P{moment} scattering",
             colorbar_label="Scattering cross section [cm^-1]",
+            logarithmic_color=(moment == 0 and np.all(scatter >= 0.0)),
         )
 
     if fissionable:
@@ -345,7 +381,6 @@ def plot_mgxs(
         fission_matrix = mgxs.nu_fission[:, None] * mgxs.chi[None, :]
         figures["fission_matrix"] = _plot_group_matrix(
             fission_matrix,
-            plotting_bounds,
             title=f"{mgxs.logical_domain} derived fission production",
             colorbar_label="Fission production [cm^-1]",
         )

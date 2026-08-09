@@ -4,6 +4,7 @@ import warnings
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import numpy as np
 import pytest
 
@@ -261,8 +262,8 @@ def test_zero_energy_matrix_spans_full_range_and_preserves_orientation():
         figures = plot_mgxs(mgxs)
 
     vector_edges = figures["cross_sections"].axes[0].patches[0].get_data().edges
-    plotting_bounds = np.array([1.0e-5, 1.0, 1.0e8])
-    np.testing.assert_array_equal(vector_edges, plotting_bounds)
+    energy_plotting_bounds = np.array([1.0e-5, 1.0, 1.0e8])
+    np.testing.assert_array_equal(vector_edges, energy_plotting_bounds)
 
     expected_matrices = {
         "scatter_p0": original_scatter[0],
@@ -272,15 +273,18 @@ def test_zero_energy_matrix_spans_full_range_and_preserves_orientation():
         matrix_axis = figures[name].axes[0]
         mesh = matrix_axis.collections[0]
         coordinates = mesh.get_coordinates()
+        displayed_matrix = mesh.get_array().reshape(2, 2)
 
-        np.testing.assert_array_equal(coordinates[0, :, 0], plotting_bounds)
-        np.testing.assert_array_equal(coordinates[:, 0, 1], plotting_bounds)
+        np.testing.assert_array_equal(coordinates[0, :, 0], [0.5, 1.5, 2.5])
+        np.testing.assert_array_equal(coordinates[:, 0, 1], [0.5, 1.5, 2.5])
         np.testing.assert_array_equal(
-            mesh.get_array().reshape(2, 2),
-            scientific_matrix.T,
+            displayed_matrix,
+            scientific_matrix[::-1, ::-1].T,
         )
-        assert matrix_axis.get_xlim() == pytest.approx((1.0e8, 1.0e-5))
-        assert matrix_axis.get_ylim() == pytest.approx((1.0e-5, 1.0e8))
+        assert displayed_matrix[0, 0] == scientific_matrix[-1, -1]
+        assert displayed_matrix[-1, -1] == scientific_matrix[0, 0]
+        assert matrix_axis.get_xlim() == pytest.approx((0.5, 2.5))
+        assert matrix_axis.get_ylim() == pytest.approx((2.5, 0.5))
 
     np.testing.assert_array_equal(mgxs.energy_bounds_ev, original_bounds)
     np.testing.assert_array_equal(mgxs.scatter, original_scatter)
@@ -329,17 +333,75 @@ def test_nonfissionable_plot_uses_energy_edges_and_requested_scatter_orientation
 
     matrix_axis = figures["scatter_p1"].axes[0]
     mesh = matrix_axis.collections[0]
-    np.testing.assert_array_equal(mesh.get_array().reshape(2, 2), mgxs.scatter[1].T)
+    assert not isinstance(mesh.norm, LogNorm)
+    displayed = mesh.get_array().reshape(2, 2)
+    expected = mgxs.scatter[1][::-1, ::-1].T
+    np.testing.assert_array_equal(displayed, expected)
+    assert displayed[0, 0] == mgxs.scatter[1, -1, -1]
+    assert displayed[-1, -1] == mgxs.scatter[1, 0, 0]
+
     coordinates = mesh.get_coordinates()
-    np.testing.assert_array_equal(coordinates[0, :, 0], mgxs.energy_bounds_ev)
-    np.testing.assert_array_equal(coordinates[:, 0, 1], mgxs.energy_bounds_ev)
-    assert matrix_axis.get_xlabel() == "Incoming energy [eV]"
-    assert matrix_axis.get_ylabel() == "Outgoing energy [eV]"
-    assert matrix_axis.get_xlim()[0] > matrix_axis.get_xlim()[1]
-    assert matrix_axis.get_ylim()[0] < matrix_axis.get_ylim()[1]
+    np.testing.assert_array_equal(coordinates[0, :, 0], [0.5, 1.5, 2.5])
+    np.testing.assert_array_equal(coordinates[:, 0, 1], [0.5, 1.5, 2.5])
+    assert matrix_axis.get_xlabel() == "Incoming group"
+    assert matrix_axis.get_ylabel() == "Outgoing group"
+    assert matrix_axis.get_xscale() == matrix_axis.get_yscale() == "linear"
+    assert matrix_axis.get_xlim() == pytest.approx((0.5, 2.5))
+    assert matrix_axis.get_ylim() == pytest.approx((2.5, 0.5))
+    np.testing.assert_array_equal(matrix_axis.get_xticks(), [1, 2])
+    np.testing.assert_array_equal(matrix_axis.get_yticks(), [1, 2])
 
     for name, values in original.items():
         np.testing.assert_array_equal(getattr(mgxs, name), values)
+
+    plt.close("all")
+
+
+def test_p0_scattering_uses_log_color_and_masks_zero_without_mutation():
+    scientific_matrix = np.array(
+        [
+            [1.0e-12, 0.0, 1.0e-9],
+            [1.0e-6, 1.0e-3, 0.0],
+            [1.0e2, 1.0, 1.0e-1],
+        ]
+    )
+    mgxs = MGXS(
+        np.array([1.0, 10.0, 100.0, 1000.0]),
+        np.ones(3),
+        np.ones(3),
+        scientific_matrix[None, :, :],
+        "log_scatter",
+        294.0,
+    )
+    original_scatter = mgxs.scatter.copy()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        figures = plot_mgxs(mgxs)
+
+    matrix_axis = figures["scatter_p0"].axes[0]
+    mesh = matrix_axis.collections[0]
+    displayed = mesh.get_array().reshape(3, 3)
+    expected = scientific_matrix[::-1, ::-1].T
+
+    assert isinstance(mesh.norm, LogNorm)
+    assert mesh.norm.vmin == pytest.approx(1.0e-12)
+    assert mesh.norm.vmax == pytest.approx(1.0e2)
+    np.testing.assert_array_equal(np.ma.getdata(displayed), expected)
+    np.testing.assert_array_equal(np.ma.getmaskarray(displayed), expected <= 0.0)
+    assert displayed[0, 0] == scientific_matrix[-1, -1]
+    assert displayed[-1, -1] == scientific_matrix[0, 0]
+
+    assert matrix_axis.get_xscale() == matrix_axis.get_yscale() == "linear"
+    assert matrix_axis.get_xlim() == pytest.approx((0.5, 3.5))
+    assert matrix_axis.get_ylim() == pytest.approx((3.5, 0.5))
+    assert "(log scale)" in figures["scatter_p0"].axes[1].get_ylabel()
+    assert not any(
+        issubclass(item.category, RuntimeWarning)
+        or "divide by zero" in str(item.message).lower()
+        for item in caught
+    )
+    np.testing.assert_array_equal(mgxs.scatter, original_scatter)
 
     plt.close("all")
 
@@ -368,12 +430,40 @@ def test_fissionable_plot_returns_and_saves_all_applicable_figures(tmp_path):
     # destination-group solver-ready chi distribution.
     mesh = figures["fission_matrix"].axes[0].collections[0]
     expected = nu_fission[:, None] * chi[None, :]
-    np.testing.assert_array_equal(mesh.get_array().reshape(2, 2), expected.T)
+    displayed = mesh.get_array().reshape(2, 2)
+    np.testing.assert_array_equal(displayed, expected[::-1, ::-1].T)
+    assert displayed[0, 0] == expected[-1, -1]
+    assert displayed[-1, -1] == expected[0, 0]
     matrix_axis = figures["fission_matrix"].axes[0]
-    assert matrix_axis.get_xlim()[0] > matrix_axis.get_xlim()[1]
-    assert matrix_axis.get_ylim()[0] < matrix_axis.get_ylim()[1]
+    assert matrix_axis.get_xlim() == pytest.approx((0.5, 2.5))
+    assert matrix_axis.get_ylim() == pytest.approx((2.5, 0.5))
     np.testing.assert_array_equal(mgxs.nu_fission, nu_fission)
     np.testing.assert_array_equal(mgxs.chi, chi)
+
+    plt.close("all")
+
+
+def test_large_group_matrix_uses_readable_integer_tick_subset():
+    groups = 361
+    mgxs = MGXS(
+        np.arange(1.0, groups + 2.0),
+        np.ones(groups),
+        np.ones(groups),
+        np.zeros((1, groups, groups)),
+        "shem_like",
+        294.0,
+    )
+
+    figures = plot_mgxs(mgxs)
+
+    matrix_axis = figures["scatter_p0"].axes[0]
+    x_ticks = matrix_axis.get_xticks()
+    y_ticks = matrix_axis.get_yticks()
+    assert 2 < len(x_ticks) <= 9
+    np.testing.assert_array_equal(x_ticks, y_ticks)
+    assert x_ticks[0] == 1
+    assert x_ticks[-1] == groups
+    assert np.all(x_ticks == x_ticks.astype(int))
 
     plt.close("all")
 
