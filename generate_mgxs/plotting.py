@@ -10,33 +10,137 @@ import numpy as np
 from .mgxs import MGXS
 
 
-def plot_spectra(*spectra, labels=None, path=None, normalize=True):
-    """Plot stepwise spectra against ascending energy boundaries."""
+def plot_spectra(
+    openmc,
+    opensn,
+    direct,
+    *,
+    output_directory=None,
+    show=False,
+):
+    """Plot three complementary OpenMC/OpenSn/direct spectrum comparisons."""
     import matplotlib.pyplot as plt
 
-    labels = labels or [
-        spectrum.logical_domain or f"spectrum {index + 1}"
-        for index, spectrum in enumerate(spectra)
-    ]
+    bounds = np.asarray(direct.energy_bounds_ev)
+    for label, spectrum in (("OpenMC", openmc), ("OpenSn", opensn)):
+        if not np.array_equal(spectrum.energy_bounds_ev, bounds):
+            raise ValueError(f"{label} and Direct must have identical energy bounds")
 
+    # Geometric group centers are appropriate marker locations on the common
+    # logarithmic energy axis; stairs() still shows the group-integrated bins.
+    centers = np.sqrt(bounds[:-1] * bounds[1:])
+    normalized = {
+        "OpenMC": openmc.normalized,
+        "OpenSn": opensn.normalized,
+        "Direct": direct.normalized,
+    }
+    styles = {
+        "OpenMC": ("C0", "o"),
+        "OpenSn": ("C1", "s"),
+        "Direct": ("C2", "^"),
+    }
+
+    figures = {}
+
+    # --- Normalized group-integrated spectrum ----------------------------
     figure, axis = plt.subplots()
+    for label, values in normalized.items():
+        color, marker = styles[label]
+        axis.stairs(values, bounds, color=color, label=label)
+        axis.plot(
+            centers,
+            values,
+            color=color,
+            marker=marker,
+            linestyle="none",
+            label="_nolegend_",
+        )
 
-    # stairs() consumes one more boundary than values, exactly matching the
-    # package's group-integrated spectrum representation.
-    for spectrum, label in zip(spectra, labels):
-        values = spectrum.normalized if normalize else spectrum.values
-        axis.stairs(values, spectrum.energy_bounds_ev, label=label)
+    if openmc.std_dev is not None:
+        # Normalize sigma by the same scalar flux sum as the mean. This ignores
+        # covariance between groups, so the band is a diagnostic rather than a
+        # propagated uncertainty on the normalized distribution.
+        normalized_sigma = openmc.std_dev / np.sum(openmc.values)
+        lower = normalized["OpenMC"] - normalized_sigma
+        upper = normalized["OpenMC"] + normalized_sigma
+        axis.stairs(
+            upper,
+            bounds,
+            baseline=lower,
+            fill=True,
+            color=styles["OpenMC"][0],
+            alpha=0.2,
+            label="OpenMC ±1σ (covariance ignored)",
+        )
 
     axis.set_xscale("log")
-    axis.set_xlabel("Energy (eV)")
-    axis.set_ylabel("Normalized group flux" if normalize else "Group-integrated flux")
+    axis.set_xlabel("Energy [eV]")
+    axis.set_ylabel("Normalized group-integrated flux")
     axis.legend()
     figure.tight_layout()
+    figures["group_spectrum"] = figure
 
-    if path is not None:
-        figure.savefig(path)
+    # --- Spectrum per unit lethargy --------------------------------------
+    lethargy_width = np.log(bounds[1:] / bounds[:-1])
+    figure, axis = plt.subplots()
+    for label, values in normalized.items():
+        per_lethargy = values / lethargy_width
+        color, marker = styles[label]
+        axis.stairs(per_lethargy, bounds, color=color, label=label)
+        axis.plot(
+            centers,
+            per_lethargy,
+            color=color,
+            marker=marker,
+            linestyle="none",
+            label="_nolegend_",
+        )
 
-    return figure, axis
+    axis.set_xscale("log")
+    axis.set_yscale("log")
+    axis.set_xlabel("Energy [eV]")
+    axis.set_ylabel("Normalized flux per unit lethargy")
+    axis.legend()
+    figure.tight_layout()
+    figures["flux_per_lethargy"] = figure
+
+    # --- Relative differences from the direct balance solution -----------
+    direct_values = normalized["Direct"]
+    floor = max(1.0e-14, 1.0e-6 * float(np.max(np.abs(direct_values))))
+    denominator = np.maximum(np.abs(direct_values), floor)
+
+    figure, axis = plt.subplots()
+    for label in ("OpenMC", "OpenSn"):
+        difference = (normalized[label] - direct_values) / denominator
+        color, marker = styles[label]
+        axis.stairs(difference, bounds, color=color, label=f"{label} vs Direct")
+        axis.plot(
+            centers,
+            difference,
+            color=color,
+            marker=marker,
+            linestyle="none",
+            label="_nolegend_",
+        )
+
+    axis.axhline(0.0, color="0.4", linewidth=0.8)
+    axis.set_xscale("log")
+    axis.set_xlabel("Energy [eV]")
+    axis.set_ylabel("Relative difference from Direct")
+    axis.legend()
+    figure.tight_layout()
+    figures["relative_differences"] = figure
+
+    if output_directory is not None:
+        output = Path(output_directory)
+        output.mkdir(parents=True, exist_ok=True)
+        for name, figure in figures.items():
+            figure.savefig(output / f"{name}.png")
+
+    if show:
+        plt.show()
+
+    return figures
 
 
 def _filename_stem(logical_domain: str) -> str:
@@ -68,6 +172,11 @@ def _plot_group_matrix(
     )
     axis.set_xscale("log")
     axis.set_yscale("log")
+
+    # Matrix displays follow the transport-review convention: incoming energy
+    # decreases from left to right, while outgoing energy increases upward.
+    # Invert only the x axis; the canonical [g_in, g_out] data are untouched.
+    axis.invert_xaxis()
     axis.set_xlabel("Incoming energy [eV]")
     axis.set_ylabel("Outgoing energy [eV]")
     axis.set_title(title)

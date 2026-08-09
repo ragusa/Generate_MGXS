@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from generate_mgxs import MGXS, plot_mgxs
+from generate_mgxs import MGXS, Spectrum, plot_mgxs, plot_spectra
 
 
 def synthetic_mgxs(*, fissionable=False):
@@ -37,6 +37,98 @@ def synthetic_mgxs(*, fissionable=False):
     )
 
 
+def comparison_spectra():
+    """Return three distinct ascending-energy spectra with OpenMC uncertainty."""
+    bounds = np.array([1.0, np.e, np.e**3])
+    openmc = Spectrum(bounds, [2.2, 5.8], std_dev=[0.2, 0.6])
+    opensn = Spectrum(bounds, [0.9, 3.1])
+    direct = Spectrum(bounds, [1.0, 3.0])
+
+    return openmc, opensn, direct
+
+
+def test_plot_spectra_writes_three_diagnostics_with_solver_markers_and_uncertainty(
+    tmp_path,
+):
+    openmc, opensn, direct = comparison_spectra()
+
+    figures = plot_spectra(
+        openmc,
+        opensn,
+        direct,
+        output_directory=tmp_path,
+    )
+
+    assert set(figures) == {
+        "group_spectrum",
+        "flux_per_lethargy",
+        "relative_differences",
+    }
+    assert {path.name for path in tmp_path.glob("*.png")} == {
+        "group_spectrum.png",
+        "flux_per_lethargy.png",
+        "relative_differences.png",
+    }
+
+    group_axis = figures["group_spectrum"].axes[0]
+    assert [line.get_marker() for line in group_axis.lines] == ["o", "s", "^"]
+    assert group_axis.get_xscale() == "log"
+
+    band = next(
+        patch
+        for patch in group_axis.patches
+        if patch.get_label() == "OpenMC ±1σ (covariance ignored)"
+    )
+    sigma = openmc.std_dev / np.sum(openmc.values)
+    np.testing.assert_allclose(band.get_data().values, openmc.normalized + sigma)
+    np.testing.assert_allclose(band.get_data().baseline, openmc.normalized - sigma)
+
+    plt.close("all")
+
+
+def test_plot_spectra_lethargy_and_relative_difference_definitions():
+    openmc, opensn, direct = comparison_spectra()
+
+    figures = plot_spectra(openmc, opensn, direct)
+
+    lethargy_axis = figures["flux_per_lethargy"].axes[0]
+    widths = np.log(direct.energy_bounds_ev[1:] / direct.energy_bounds_ev[:-1])
+    for label, spectrum in (
+        ("OpenMC", openmc),
+        ("OpenSn", opensn),
+        ("Direct", direct),
+    ):
+        patch = next(item for item in lethargy_axis.patches if item.get_label() == label)
+        np.testing.assert_allclose(patch.get_data().values, spectrum.normalized / widths)
+    assert lethargy_axis.get_xscale() == lethargy_axis.get_yscale() == "log"
+    assert [line.get_marker() for line in lethargy_axis.lines] == ["o", "s", "^"]
+
+    relative_axis = figures["relative_differences"].axes[0]
+    direct_values = direct.normalized
+    floor = max(1.0e-14, 1.0e-6 * np.max(np.abs(direct_values)))
+    denominator = np.maximum(np.abs(direct_values), floor)
+    for label, spectrum in (("OpenMC", openmc), ("OpenSn", opensn)):
+        patch = next(
+            item
+            for item in relative_axis.patches
+            if item.get_label() == f"{label} vs Direct"
+        )
+        expected = (spectrum.normalized - direct_values) / denominator
+        np.testing.assert_allclose(patch.get_data().values, expected)
+    assert not any("Direct vs Direct" in patch.get_label() for patch in relative_axis.patches)
+    assert [line.get_marker() for line in relative_axis.lines[:2]] == ["o", "s"]
+
+    plt.close("all")
+
+
+def test_plot_spectra_requires_identical_energy_bounds():
+    openmc, opensn, direct = comparison_spectra()
+    opensn = Spectrum([1.0, 2.0, np.e**3], opensn.values)
+
+    with pytest.raises(ValueError, match="identical energy bounds"):
+        plot_spectra(openmc, opensn, direct)
+
+
 def test_nonfissionable_plot_uses_energy_edges_and_requested_scatter_orientation():
     """Plotting transposes the view, never canonical [g_in, g_out] data."""
     mgxs = synthetic_mgxs()
@@ -61,6 +153,8 @@ def test_nonfissionable_plot_uses_energy_edges_and_requested_scatter_orientation
     np.testing.assert_array_equal(coordinates[:, 0, 1], mgxs.energy_bounds_ev)
     assert matrix_axis.get_xlabel() == "Incoming energy [eV]"
     assert matrix_axis.get_ylabel() == "Outgoing energy [eV]"
+    assert matrix_axis.get_xlim()[0] > matrix_axis.get_xlim()[1]
+    assert matrix_axis.get_ylim()[0] < matrix_axis.get_ylim()[1]
 
     for name, values in original.items():
         np.testing.assert_array_equal(getattr(mgxs, name), values)
@@ -93,6 +187,9 @@ def test_fissionable_plot_returns_and_saves_all_applicable_figures(tmp_path):
     mesh = figures["fission_matrix"].axes[0].collections[0]
     expected = nu_fission[:, None] * chi[None, :]
     np.testing.assert_array_equal(mesh.get_array().reshape(2, 2), expected.T)
+    matrix_axis = figures["fission_matrix"].axes[0]
+    assert matrix_axis.get_xlim()[0] > matrix_axis.get_xlim()[1]
+    assert matrix_axis.get_ylim()[0] < matrix_axis.get_ylim()[1]
     np.testing.assert_array_equal(mgxs.nu_fission, nu_fission)
     np.testing.assert_array_equal(mgxs.chi, chi)
 

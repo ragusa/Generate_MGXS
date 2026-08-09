@@ -47,12 +47,10 @@ opensn = run_opensn(run_path, executable=os.environ["OPENSN_CONSOLE"])
 
 # --- Result comparison ----------------------------------------------------
 # Expected solver products include openmc/mgxs.h5, both compact result JSON
-# files, diagnostic uncertainty JSON, persistent logs, and this comparison plot.
-(run_path / "plots").mkdir(exist_ok=True)
+# files, diagnostic uncertainty JSON, persistent logs, and three comparison plots.
 plot_spectra(
     openmc_result,
-    direct.spectrum,
     opensn.spectrum,
-    labels=("OpenMC", "direct", "OpenSn"),
-    path=run_path / "plots/spectra.png",
+    direct.spectrum,
+    output_directory=run_path / "plots",
 )
