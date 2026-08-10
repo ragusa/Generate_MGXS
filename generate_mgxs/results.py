@@ -1,4 +1,4 @@
-"""The three result types exposed by the package."""
+"""Small result value objects exposed by the package."""
 
 from __future__ import annotations
 
@@ -53,15 +53,79 @@ class InfiniteMediumSolution:
         self.balance = float(balance)
 
 
+class EigenvalueSolution:
+    """Normalized direct eigenvector, multiplication factor, and residual."""
+
+    def __init__(self, spectrum, k_eff, residual):
+        self.spectrum = spectrum
+        self.k_eff = float(k_eff)
+        self.residual = float(residual)
+
+
+class OpenMCEigenvalueResult:
+    """OpenMC eigenvalue estimate and its raw group-integrated flux tally."""
+
+    def __init__(self, spectrum, k_eff, k_eff_std_dev):
+        self.spectrum = spectrum
+        self.k_eff = float(k_eff)
+        self.k_eff_std_dev = float(k_eff_std_dev)
+
+        if not np.isfinite(self.k_eff) or self.k_eff <= 0.0:
+            raise ValueError("OpenMC k_eff must be finite and positive")
+        if not np.isfinite(self.k_eff_std_dev) or self.k_eff_std_dev < 0.0:
+            raise ValueError("OpenMC k_eff_std_dev must be finite and nonnegative")
+
+
 class OpenSnResult:
-    """A strictly converged OpenSn solution and optional material spectra."""
+    """A strictly converged fixed-source or eigenvalue OpenSn solution."""
 
     def __init__(
-        self, spectrum, converged, iterations, residual, balance=None, domain_spectra=None
+        self,
+        spectrum,
+        converged,
+        iterations=None,
+        residual=None,
+        balance=None,
+        domain_spectra=None,
+        *,
+        run_mode="fixed_source",
+        k_eff=None,
+        k_eff_change=None,
+        power_iterations=None,
+        sweeps=None,
     ):
         self.spectrum = spectrum
         self.converged = bool(converged)
-        self.iterations = int(iterations)
-        self.residual = float(residual)
+        self.iterations = None if iterations is None else int(iterations)
+        self.residual = None if residual is None else float(residual)
         self.balance = None if balance is None else float(balance)
         self.domain_spectra = domain_spectra
+        self.run_mode = run_mode
+        self.k_eff = None if k_eff is None else float(k_eff)
+        self.k_eff_change = (
+            None if k_eff_change is None else float(k_eff_change)
+        )
+        self.power_iterations = (
+            None if power_iterations is None else int(power_iterations)
+        )
+        self.sweeps = None if sweeps is None else int(sweeps)
+
+        if self.run_mode not in {"fixed_source", "eigenvalue"}:
+            raise ValueError("OpenSn run_mode must be fixed_source or eigenvalue")
+        if self.run_mode == "eigenvalue":
+            if (
+                self.k_eff is None
+                or not np.isfinite(self.k_eff)
+                or self.k_eff <= 0.0
+            ):
+                raise ValueError("OpenSn k_eff must be finite and positive")
+            if (
+                self.k_eff_change is None
+                or not np.isfinite(self.k_eff_change)
+                or self.k_eff_change < 0.0
+            ):
+                raise ValueError("OpenSn k_eff_change must be finite and nonnegative")
+            if self.power_iterations is None or self.power_iterations < 1:
+                raise ValueError("OpenSn power_iterations must be positive")
+            if self.sweeps is None or self.sweeps < 1:
+                raise ValueError("OpenSn sweeps must be positive")

@@ -15,7 +15,7 @@ import numpy as np
 CASE_NAME = __CASE_NAME__
 MATERIALS = __MATERIALS__
 
-# This is the same physical authority used to build the continuous OpenMC source.
+# Fixed-source cases share this authority with OpenMC; eigenvalue cases use None.
 PHYSICAL_SOURCE = __PHYSICAL_SOURCE__
 
 # Only convergence controls remain case-specific. Geometry and angular settings
@@ -47,6 +47,8 @@ CONFIG = {
     "materials": MATERIALS,
     **OPENSN_NUMERICAL_SETTINGS,
 }
+if CONFIG["run_mode"] == "eigenvalue" and len(CONFIG["materials"]) != 1:
+    raise ValueError("OpenSn eigenvalue verification requires one material domain")
 
 
 def source_probabilities():
@@ -90,7 +92,10 @@ def source_probabilities():
     return masses
 
 
-SOURCE_PROBABILITIES_ASCENDING = source_probabilities()
+if CONFIG["run_mode"] == "fixed_source":
+    SOURCE_PROBABILITIES_ASCENDING = source_probabilities()
+else:
+    SOURCE_PROBABILITIES_ASCENDING = None
 
 
 # --- Fixed verification mesh ----------------------------------------------
@@ -141,25 +146,27 @@ REFLECTING_BOUNDARIES = [
     {"name": "zmax", "type": "reflecting"},
 ]
 
-# --- Fixed source ---------------------------------------------------------
-if SOURCE_PROBABILITIES_ASCENDING.shape != (NUM_GROUPS,):
-    raise ValueError("source must contain one integrated probability per group")
-if np.any(SOURCE_PROBABILITIES_ASCENDING < 0.0) or not math.isclose(
-    float(SOURCE_PROBABILITIES_ASCENDING.sum()), 1.0, abs_tol=1e-12
-):
-    raise ValueError("source group probabilities must be nonnegative and sum to one")
-# OpenSn numbers group 0 at highest energy, so reverse the ascending physical
-# source vector at this boundary only. Division by the fixed cube volume makes
-# the volume-integrated source exactly one particle for every domain solve.
-source_strength_high_to_low = (
-    SOURCE_PROBABILITIES_ASCENDING[::-1] / VERIFICATION["volume_cm3"]
-)
-if not math.isclose(
-    float(source_strength_high_to_low.sum() * VERIFICATION["volume_cm3"]),
-    1.0,
-    abs_tol=1.0e-12,
-):
-    raise ValueError("fixed OpenSn volumetric source does not integrate to one")
+# --- Optional fixed source ------------------------------------------------
+source_strength_high_to_low = None
+if CONFIG["run_mode"] == "fixed_source":
+    if SOURCE_PROBABILITIES_ASCENDING.shape != (NUM_GROUPS,):
+        raise ValueError("source must contain one integrated probability per group")
+    if np.any(SOURCE_PROBABILITIES_ASCENDING < 0.0) or not math.isclose(
+        float(SOURCE_PROBABILITIES_ASCENDING.sum()), 1.0, abs_tol=1e-12
+    ):
+        raise ValueError("source group probabilities must be nonnegative and sum to one")
+    # OpenSn numbers group 0 at highest energy, so reverse the ascending
+    # physical source vector at this boundary only. The eigenvalue branch has
+    # no external source and lets power iteration initialize its own flux.
+    source_strength_high_to_low = (
+        SOURCE_PROBABILITIES_ASCENDING[::-1] / VERIFICATION["volume_cm3"]
+    )
+    if not math.isclose(
+        float(source_strength_high_to_low.sum() * VERIFICATION["volume_cm3"]),
+        1.0,
+        abs_tol=1.0e-12,
+    ):
+        raise ValueError("fixed OpenSn volumetric source does not integrate to one")
 
 
 def volume_integral(field, volume):
@@ -180,6 +187,7 @@ if not MGXS_HDF5.is_file():
     raise FileNotFoundError(f"OpenMC MGXS HDF5 is missing: {MGXS_HDF5}")
 
 domain_results = {}
+eigenvalue_metrics = None
 for material in CONFIG["materials"]:
     logical_name = material["logical_name"]
     cross_sections = MultiGroupXS()
@@ -200,31 +208,47 @@ for material in CONFIG["materials"]:
         "l_max_its": CONFIG["gmres_max_iterations"],
         "gmres_restart_interval": CONFIG["gmres_restart"],
     }]
+    problem_options = {"save_angular_flux": False}
+    if CONFIG["run_mode"] == "eigenvalue":
+        problem_options.update({
+            "use_precursors": False,
+            "verbose_inner_iterations": False,
+            "verbose_outer_iterations": True,
+        })
     problem = DiscreteOrdinatesProblem(
         mesh=grid,
         num_groups=NUM_GROUPS,
         groupsets=groupsets,
         xs_map=[{"block_ids": [0], "xs": cross_sections}],
         boundary_conditions=REFLECTING_BOUNDARIES,
-        options={"save_angular_flux": False},
+        options=problem_options,
     )
-    problem.SetVolumetricSources(
-        volumetric_sources=[
-            VolumetricSource(
-                block_ids=[0],
-                group_strength=source_strength_high_to_low.tolist(),
-            )
-        ]
-    )
+    if CONFIG["run_mode"] == "fixed_source":
+        problem.SetVolumetricSources(
+            volumetric_sources=[
+                VolumetricSource(
+                    block_ids=[0],
+                    group_strength=source_strength_high_to_low.tolist(),
+                )
+            ]
+        )
 
-    # Delimit each solve so the Python runner can require explicit convergence
-    # independently for every HDF5 material domain.
-    if globals().get("rank", 0) == 0:
-        print(f"GENERATE_MGXS_DOMAIN_BEGIN {logical_name}", flush=True)
-    solver = SteadyStateSourceSolver(problem=problem, compute_balance=True)
+        # Delimit each solve so the runner can validate every material domain.
+        if globals().get("rank", 0) == 0:
+            print(f"GENERATE_MGXS_DOMAIN_BEGIN {logical_name}", flush=True)
+        solver = SteadyStateSourceSolver(problem=problem, compute_balance=True)
+    else:
+        # OpenSn initializes the power-iteration scalar flux. No external
+        # source is introduced into this homogeneous reflected eigenproblem.
+        solver = PowerIterationKEigenSolver(
+            problem=problem,
+            max_iters=CONFIG["keigen_max_iterations"],
+            k_tol=CONFIG["keigen_tolerance"],
+            compute_balance=True,
+        )
     solver.Initialize()
     solver.Execute()
-    if globals().get("rank", 0) == 0:
+    if CONFIG["run_mode"] == "fixed_source" and globals().get("rank", 0) == 0:
         print(f"GENERATE_MGXS_DOMAIN_END {logical_name}", flush=True)
 
     balance_values = {
@@ -240,6 +264,22 @@ for material in CONFIG["materials"]:
     # OpenSn group zero is highest energy; serialize package-facing values in
     # ascending physical-energy order without changing the HDF5 group contract.
     flux_ascending = flux_high_to_low[::-1]
+    if CONFIG["run_mode"] == "eigenvalue":
+        negative_tolerance = 1.0e-13 * max(
+            1.0, float(np.max(np.abs(flux_ascending)))
+        )
+        if np.any(flux_ascending < -negative_tolerance):
+            raise ValueError("OpenSn eigenvalue spectrum contains negative flux")
+        flux_ascending = np.where(flux_ascending < 0.0, 0.0, flux_ascending)
+        flux_sum = float(flux_ascending.sum())
+        if not math.isfinite(flux_sum) or flux_sum <= 0.0:
+            raise ValueError("OpenSn eigenvalue spectrum cannot be normalized")
+        flux_ascending = flux_ascending / flux_sum
+        eigenvalue_metrics = {
+            "k_eff": float(solver.GetEigenvalue()),
+            "power_iterations": int(solver.GetNumPowerIterations()),
+            "sweeps": int(solver.GetNumSweeps()),
+        }
     balance = balance_values.get(
         "balance",
         balance_values.get("production_rate", 0.0)
@@ -258,21 +298,39 @@ primary = next(
     item["logical_name"] for item in CONFIG["materials"]
     if item["role"] in ("homogeneous", "target")
 )
-result = {
-    "energy_bounds": ENERGY_BOUNDS_EV_ASCENDING.tolist(),
-    "flux": domain_results[primary]["flux"],
-    "logical_domain": primary,
-    "domains": domain_results,
-    "verification": VERIFICATION,
-    "solver": {
-        "converged": None,
-        "iterations": None,
-        "residual": None,
-        "tolerance": CONFIG["gmres_tolerance"],
-        "maximum_iterations": CONFIG["gmres_max_iterations"],
-        "balance": domain_results[primary]["balance"],
-    },
-}
+if CONFIG["run_mode"] == "eigenvalue":
+    result = {
+        "run_mode": "eigenvalue",
+        "energy_bounds": ENERGY_BOUNDS_EV_ASCENDING.tolist(),
+        "flux": domain_results[primary]["flux"],
+        "logical_domain": primary,
+        "domains": domain_results,
+        "verification": VERIFICATION,
+        "solver": {
+            "converged": None,
+            **eigenvalue_metrics,
+            "k_eff_change": None,
+            "k_tolerance": CONFIG["keigen_tolerance"],
+            "maximum_iterations": CONFIG["keigen_max_iterations"],
+            "balance": domain_results[primary]["balance"],
+        },
+    }
+else:
+    result = {
+        "energy_bounds": ENERGY_BOUNDS_EV_ASCENDING.tolist(),
+        "flux": domain_results[primary]["flux"],
+        "logical_domain": primary,
+        "domains": domain_results,
+        "verification": VERIFICATION,
+        "solver": {
+            "converged": None,
+            "iterations": None,
+            "residual": None,
+            "tolerance": CONFIG["gmres_tolerance"],
+            "maximum_iterations": CONFIG["gmres_max_iterations"],
+            "balance": domain_results[primary]["balance"],
+        },
+    }
 
 if globals().get("rank", 0) == 0:
     # MPI ranks share RESULT_PATH; only rank zero writes the compact handoff.

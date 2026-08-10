@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "generate-mgxs"
 version = "0.1.0"
-description = "Transparent OpenMC to OpenSn multigroup fixed-source calculations"
+description = "Transparent homogeneous OpenMC to OpenSn multigroup calculations"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["h5py>=3.8", "numpy>=1.24"]

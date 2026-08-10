@@ -1,7 +1,8 @@
 # Generate MGXS
 
 `generate_mgxs` is a small, explicit bridge between OpenMC and OpenSn for
-fixed-source multigroup calculations. Python-facing energy arrays always run
+homogeneous multigroup calculations. It supports fixed-source calculations and
+one-material k-eigenvalue verification. Python-facing energy arrays always run
 from low to high physical energy. OpenMC MGXS arrays and OpenSn group numbering
 are converted at their boundaries only.
 
@@ -81,11 +82,16 @@ natural elements:
 be9 = Material("be9", "Be-9", 1.85, (("Be9", 1.0),))
 iron = Material("iron", "natural iron", 7.87, (("Fe", 1.0),))
 steel = Material("steel", "Fe-C", 7.8, (("Fe", 0.98), ("C", 0.02)))
+uranium = Material(
+    "fuel", "uranium", 18.823124,
+    (("U234", 2.5759e-6), ("U235", 3.4428e-4), ("U238", 4.7441e-2)),
+)
 ```
 
 A mass number selects an explicit nuclide; a bare symbol delegates natural
 isotope expansion to OpenMC. The package carries no periodic-table or natural-
-abundance database.
+abundance database. Composition values are nonnegative relative atomic amounts;
+they need not sum to one and are passed unchanged to OpenMC with `percent_type="ao"`.
 
 For `run_dir=results/material_001`, the direct serial command contract is:
 
@@ -133,7 +139,18 @@ The returned dictionary contains the applicable cross-section, chi,
 scattering-moment, and derived fission-production figures. Energy axes use the
 package's ascending-eV convention; plotting never requires OpenSn.
 
-Complete, commented Be-9 and UO2-in-HDPE definitions are in `examples/`.
+Complete, commented Be-9, UO2-in-HDPE, and homogeneous FlatTop definitions are
+in `examples/`. FlatTop uses `run_mode="eigenvalue"`; its direct comparison is:
+
+```python
+direct = solve_infinite_medium_eigenvalue(mgxs)
+print(openmc_result.k_eff, direct.k_eff, opensn_result.k_eff)
+```
+
+Eigenvectors are compared through their independently normalized spectrum
+shapes; raw OpenMC tally values and uncertainty remain available on
+`openmc_result.spectrum`.
+
 Their run scripts use `OPENMC_CROSS_SECTIONS` and `OPENSN_CONSOLE`; no
 machine-specific path is embedded. The generated Python files are readable
 solver inputs, not wrappers around hidden configuration or in-memory `Case`
@@ -147,6 +164,10 @@ is loaded and solved independently in a homogeneous, all-reflecting 2 cm cube
 with 2 cells per axis (8 cells total). The fixed
 GLCProductQuadrature3DXYZ(2, 4) supplies 8 directions, and P0 scattering is
 sufficient for the isotropic infinite-homogeneous scalar-flux comparison.
+Fixed-source cases use the existing steady-state source solver. A homogeneous
+eigenvalue case instead uses `PowerIterationKEigenSolver` with no external
+volumetric source and reports normalized flux shape, k-effective, power
+iterations, sweeps, balance, and final relative k change.
 
 OpenMC target/moderator dimensions and boundary choices therefore do not
 control OpenSn cost. scattering_order remains a Case setting because it

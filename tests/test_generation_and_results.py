@@ -249,15 +249,76 @@ def test_generated_openmc_marks_nuclides_and_natural_elements(tmp_path):
     assert components[0] == {
         "identifier": "Fe",
         "kind": "element",
-        "atom_fraction": 0.98,
+        "atom_amount": 0.98,
     }
     assert components[1] == {
         "identifier": "C12",
         "kind": "nuclide",
-        "atom_fraction": 0.02,
+        "atom_amount": 0.02,
     }
     assert "material.add_element" in text
     assert "material.add_nuclide" in text
+
+
+def test_flattop_eigenvalue_generation_preserves_its_scientific_definition(
+    tmp_path,
+):
+    """FlatTop generation retains notebook inputs without inventing a source."""
+    import runpy
+
+    from examples.flattop.case import CASE
+
+    run = prepare(CASE, tmp_path / "flattop")
+    model_path = run / "openmc/model.py"
+    model_text = model_path.read_text()
+    opensn_text = (run / "opensn/input.py").read_text()
+    metadata = json.loads((run / "_metadata/run.json").read_text())["case"]
+    materials = _literal_assignment(model_text, "MATERIALS")
+    history = _literal_assignment(model_text, "OPENMC_HISTORY_SETTINGS")
+    geometry = _literal_assignment(model_text, "GEOMETRY")
+
+    expected_amounts = [2.5759e-06, 3.4428e-04, 4.7441e-02]
+    assert [item["atom_amount"] for item in materials[0]["composition"]] == (
+        expected_amounts
+    )
+    assert [item["atom_amount"] for item in metadata["materials"][0]["composition"]] == (
+        expected_amounts
+    )
+    assert "source" not in metadata
+    assert "source_probabilities" not in metadata
+    assert history == {
+        "run_mode": "eigenvalue",
+        "particles_per_batch": 20_000,
+        "batches": 520,
+        "inactive_batches": 120,
+        "total_histories": 10_400_000,
+    }
+    assert geometry["target_dimensions_cm"] == (2.0, 2.0, 2.0)
+    assert set(geometry["boundaries"].values()) == {"reflective"}
+    assert _literal_assignment(model_text, "PHYSICAL_SOURCE") is None
+    assert 'only_fissionable=True' in model_text
+    assert 'PowerIterationKEigenSolver' in opensn_text
+    assert '"scattering_order": 0' in opensn_text
+    assert '"angular_directions": 8' in opensn_text
+
+    # Constructing the generated native model is a fast smoke test of the
+    # actual OpenMC Settings API; no particle transport is started.
+    generated = runpy.run_path(model_path)
+    settings = generated["MODEL"].settings
+    library = generated["MGXS_LIBRARY"]
+    initial_source = settings.source[0]
+    assert settings.run_mode == "eigenvalue"
+    assert (settings.batches, settings.inactive, settings.particles) == (
+        520,
+        120,
+        20_000,
+    )
+    assert settings.temperature["method"] == "interpolation"
+    assert initial_source.space.only_fissionable is True
+    assert initial_source.energy is None
+    assert library.scatter_format == "legendre"
+    assert library.legendre_order == 7
+    assert library.correction is None
 
 
 def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, tmp_path):
@@ -411,6 +472,28 @@ def test_load_openmc_seed_preserves_standard_deviation():
     assert np.all(np.diff(result.energy_bounds_ev) > 0.0)
 
 
+def test_load_openmc_eigenvalue_result_preserves_keff_and_raw_flux(tmp_path):
+    """Eigenvalue loading adds k data without normalizing the raw OpenMC tally."""
+    path = tmp_path / "openmc_result.json"
+    path.write_text(json.dumps({
+        "run_mode": "eigenvalue",
+        "energy_bounds": [1.0, 2.0, 5.0],
+        "flux": [12.0, 3.0],
+        "std_dev": [0.6, 0.2],
+        "logical_domain": "fuel",
+        "k_eff": 1.01234,
+        "k_eff_std_dev": 0.00021,
+    }))
+
+    result = load_openmc_result(path)
+
+    assert result.k_eff == pytest.approx(1.01234)
+    assert result.k_eff_std_dev == pytest.approx(0.00021)
+    np.testing.assert_array_equal(result.spectrum.values, [12.0, 3.0])
+    np.testing.assert_array_equal(result.spectrum.std_dev, [0.6, 0.2])
+    np.testing.assert_allclose(result.spectrum.normalized, [0.8, 0.2])
+
+
 def test_load_converged_opensn_seed():
     """A stored OpenSn result remains usable only with explicit convergence evidence."""
     result = load_opensn_result(EVIDENCE / "be9_opensn_result.json")
@@ -462,6 +545,10 @@ def test_examples_show_the_complete_workflows():
         (root / "examples/moderated/case.py").read_text()
         + (root / "examples/moderated/run.py").read_text()
     )
+    flattop = (
+        (root / "examples/flattop/case.py").read_text()
+        + (root / "examples/flattop/run.py").read_text()
+    )
 
     for name in ("prepare", "run_openmc", "load_mgxs", "solve_infinite_medium", "run_opensn"):
         assert name in be9
@@ -472,6 +559,16 @@ def test_examples_show_the_complete_workflows():
     assert "OPENSN_CONSOLE" in be9 + moderated
     assert "run_path = prepare" in be9 + moderated
     assert "plot_mgxs" in be9 + moderated
+    for name in (
+        "run_mode=\"eigenvalue\"",
+        "inactive_batches=120",
+        "solve_infinite_medium_eigenvalue",
+        "OpenMC k_eff",
+        "Direct  k_eff",
+        "OpenSn  k_eff",
+    ):
+        assert name in flattop
+    assert "/home/ragusa/" not in flattop
 
 
 def test_prepare_does_not_execute_subprocesses(one_case, tmp_path, monkeypatch):

@@ -160,7 +160,7 @@ def source_probabilities(
 
 
 class Material:
-    """A material composition identified by its physical geometry role."""
+    """A material with nonnegative relative atomic composition amounts."""
 
     def __init__(
         self,
@@ -181,12 +181,12 @@ class Material:
 
         try:
             components = tuple(
-                (str(identifier), float(fraction))
-                for identifier, fraction in composition
+                (str(identifier), float(amount))
+                for identifier, amount in composition
             )
         except (TypeError, ValueError) as error:
             raise ValueError(
-                "material composition must contain identifier/fraction pairs"
+                "material composition must contain identifier/amount pairs"
             ) from error
 
         if not components:
@@ -201,15 +201,14 @@ class Material:
                 f"invalid material composition identifier {invalid[0]!r}"
             )
 
-        fractions = np.asarray([fraction for _, fraction in components], dtype=float)
+        amounts = np.asarray([amount for _, amount in components], dtype=float)
         if (
-            not np.all(np.isfinite(fractions))
-            or np.any(fractions < 0.0)
-            or not np.any(fractions > 0.0)
-            or not np.isclose(fractions.sum(), 1.0, rtol=0.0, atol=1.0e-12)
+            not np.all(np.isfinite(amounts))
+            or np.any(amounts < 0.0)
+            or not np.any(amounts > 0.0)
         ):
             raise ValueError(
-                "material atom fractions must be finite, nonnegative, and sum to one"
+                "material atom amounts must be finite, nonnegative, and not all zero"
             )
 
         thermal_scattering = tuple(str(table) for table in thermal_scattering)
@@ -224,8 +223,9 @@ class Material:
         self.thermal_scattering = thermal_scattering
         self.role = role
 
+
 class Case:
-    """One independently preparable case with named or explicit energy groups."""
+    """One independently preparable fixed-source or homogeneous eigenvalue case."""
 
     def __init__(
         self,
@@ -233,17 +233,21 @@ class Case:
         name: str,
         materials,
         energy_groups,
-        source_kind: Literal["uniform_energy", "watt", "grouped"],
         target_dimensions_cm,
+        source_kind: Literal["uniform_energy", "watt", "grouped"] | None = None,
+        run_mode: Literal["fixed_source", "eigenvalue"] = "fixed_source",
         source_probabilities=None,
         outer_dimensions_cm=None,
         boundaries=("reflective",) * 6,
         particles_per_batch: int = 25_000,
         batches: int = 40,
+        inactive_batches: int = 0,
         scattering_order: int = 3,
         gmres_tolerance: float = 1.0e-10,
         gmres_max_iterations: int = 1200,
         gmres_restart: int = 100,
+        keigen_tolerance: float = 1.0e-8,
+        keigen_max_iterations: int = 1000,
         watt_a_mev: float = 0.988,
         watt_b_per_mev: float = 2.249,
     ):
@@ -276,16 +280,34 @@ class Case:
                 float(value)
                 for value in _ascending(energy_groups, name="energy boundaries")
             )
-        if source_kind not in {"uniform_energy", "watt", "grouped"}:
-            raise ValueError("source kind must be uniform_energy, watt, or grouped")
 
-        watt_a_mev = _positive_float(watt_a_mev, "Watt a_mev")
-        watt_b_per_mev = _positive_float(watt_b_per_mev, "Watt b_per_mev")
+        if run_mode not in {"fixed_source", "eigenvalue"}:
+            raise ValueError("run_mode must be fixed_source or eigenvalue")
+        if run_mode == "eigenvalue" and len(materials) != 1:
+            raise ValueError("eigenvalue cases require one homogeneous material")
+        if run_mode == "fixed_source":
+            if source_kind not in {"uniform_energy", "watt", "grouped"}:
+                raise ValueError(
+                    "fixed-source cases require source kind to be "
+                    "uniform_energy, watt, or grouped"
+                )
+        elif source_kind is not None:
+            raise ValueError("eigenvalue cases do not accept source_kind")
+
+        if run_mode == "fixed_source":
+            watt_a_mev = _positive_float(watt_a_mev, "Watt a_mev")
+            watt_b_per_mev = _positive_float(watt_b_per_mev, "Watt b_per_mev")
+        else:
+            watt_a_mev = None
+            watt_b_per_mev = None
         grouped = None
 
         # Only a grouped source owns an explicit probability vector. Uniform
         # and Watt vectors are derived later from their physical definitions.
-        if source_kind == "grouped":
+        if run_mode == "eigenvalue":
+            if source_probabilities is not None:
+                raise ValueError("eigenvalue cases do not accept source_probabilities")
+        elif source_kind == "grouped":
             if source_probabilities is None:
                 raise ValueError("grouped source requires source_probabilities")
             grouped_array = np.asarray(source_probabilities, dtype=float)
@@ -318,6 +340,7 @@ class Case:
         self.materials = materials
         self.energy_group_structure = energy_group_structure
         self.energy_bounds_ev = bounds
+        self.run_mode = run_mode
         self.source_kind = source_kind
         self._grouped_source_probabilities = grouped
         self.target_dimensions_cm = target
@@ -327,12 +350,28 @@ class Case:
             particles_per_batch, "particles_per_batch", minimum=1
         )
         self.batches = _integer(batches, "batches", minimum=1)
+        self.inactive_batches = _integer(
+            inactive_batches, "inactive_batches", minimum=0
+        )
+        if self.run_mode == "fixed_source" and self.inactive_batches != 0:
+            raise ValueError("fixed-source cases require inactive_batches=0")
+        if (
+            self.run_mode == "eigenvalue"
+            and self.inactive_batches >= self.batches
+        ):
+            raise ValueError("eigenvalue inactive_batches must be less than batches")
         self.scattering_order = _integer(scattering_order, "scattering_order", minimum=0)
         self.gmres_tolerance = _positive_float(gmres_tolerance, "gmres_tolerance")
         self.gmres_max_iterations = _integer(
             gmres_max_iterations, "gmres_max_iterations", minimum=1
         )
         self.gmres_restart = _integer(gmres_restart, "gmres_restart", minimum=1)
+        self.keigen_tolerance = _positive_float(
+            keigen_tolerance, "keigen_tolerance"
+        )
+        self.keigen_max_iterations = _integer(
+            keigen_max_iterations, "keigen_max_iterations", minimum=1
+        )
 
         self.watt_a_mev = watt_a_mev
         self.watt_b_per_mev = watt_b_per_mev
@@ -352,7 +391,9 @@ class Case:
 
     @property
     def source_probabilities(self) -> tuple[float, ...]:
-        """Return final group probabilities in ascending physical-energy order."""
+        """Return fixed-source group probabilities in ascending energy order."""
+        if self.run_mode != "fixed_source":
+            raise ValueError("eigenvalue cases have no external source probabilities")
         if self.source_kind == "grouped":
             return self._grouped_source_probabilities
         return source_probabilities(
@@ -363,8 +404,10 @@ class Case:
         )
 
     @property
-    def source_definition(self) -> dict:
+    def source_definition(self) -> dict | None:
         """Return the single physical source definition used by both solvers."""
+        if self.run_mode != "fixed_source":
+            return None
         if self.source_kind == "uniform_energy":
             return {"kind": "uniform_energy"}
         if self.source_kind == "watt":
@@ -412,9 +455,9 @@ def _material_records(case: Case) -> list[dict]:
                         if any(char.isdigit() for char in identifier)
                         else "element"
                     ),
-                    "atom_fraction": atom_fraction,
+                    "atom_amount": atom_amount,
                 }
-                for identifier, atom_fraction in material.composition
+                for identifier, atom_amount in material.composition
             ),
             "temperature_k": material.temperature_k,
             "thermal_scattering": material.thermal_scattering,
@@ -426,26 +469,32 @@ def _material_records(case: Case) -> list[dict]:
 
 
 def _jsonable_case(case: Case) -> dict:
-    return {
+    record = {
         "name": case.name,
         "materials": _material_records(case),
         "energy_group_structure": case.energy_group_structure,
         "energy_bounds_ev": case.energy_bounds_ev,
-        "source": case.source_definition,
-        "source_probabilities": case.source_probabilities,
+        "run_mode": case.run_mode,
         "target_dimensions_cm": case.target_dimensions_cm,
         "outer_dimensions_cm": case.outer_dimensions_cm,
         "boundaries": case.boundaries,
         "particles_per_batch": case.particles_per_batch,
         "batches": case.batches,
+        "inactive_batches": case.inactive_batches,
         "total_histories": case.total_histories,
         "scattering_order": case.scattering_order,
         "gmres_tolerance": case.gmres_tolerance,
         "gmres_max_iterations": case.gmres_max_iterations,
         "gmres_restart": case.gmres_restart,
+        "keigen_tolerance": case.keigen_tolerance,
+        "keigen_max_iterations": case.keigen_max_iterations,
         "geometry_type": case.geometry_type,
-        "source_volume_cm3": case.source_volume_cm3,
     }
+    if case.run_mode == "fixed_source":
+        record["source"] = case.source_definition
+        record["source_probabilities"] = case.source_probabilities
+        record["source_volume_cm3"] = case.source_volume_cm3
+    return record
 
 
 def _artifact(path: Path, root: Path) -> dict:

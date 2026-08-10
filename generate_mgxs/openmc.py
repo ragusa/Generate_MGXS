@@ -15,7 +15,7 @@ import sys
 import numpy as np
 
 from .case import Case, _artifact, _material_records, _update_run_metadata
-from .results import Spectrum
+from .results import OpenMCEigenvalueResult, Spectrum
 
 
 def _write_openmc_input(case: Case, path: Path) -> None:
@@ -32,8 +32,10 @@ def _write_openmc_input(case: Case, path: Path) -> None:
     }
 
     history = {
+        "run_mode": case.run_mode,
         "particles_per_batch": case.particles_per_batch,
         "batches": case.batches,
+        "inactive_batches": case.inactive_batches,
         "total_histories": case.total_histories,
     }
 
@@ -202,8 +204,8 @@ def run_openmc(
     return run / "openmc" / "mgxs.h5"
 
 
-def load_openmc_result(path) -> Spectrum:
-    """Load the canonical compact OpenMC spectrum result."""
+def load_openmc_result(path) -> Spectrum | OpenMCEigenvalueResult:
+    """Load a compact fixed-source spectrum or OpenMC eigenvalue result."""
     path = Path(path)
     if path.is_dir():
         path = path / "openmc" / "openmc_result.json"
@@ -212,9 +214,20 @@ def load_openmc_result(path) -> Spectrum:
     if "std_dev" not in document:
         raise ValueError("OpenMC result does not contain statistical uncertainty")
 
-    return Spectrum(
+    spectrum = Spectrum(
         np.asarray(document["energy_bounds"], dtype=float),
         np.asarray(document["flux"], dtype=float),
         np.asarray(document["std_dev"], dtype=float),
         document.get("logical_domain"),
     )
+    if document.get("run_mode") == "eigenvalue":
+        try:
+            return OpenMCEigenvalueResult(
+                spectrum,
+                document["k_eff"],
+                document["k_eff_std_dev"],
+            )
+        except KeyError as error:
+            raise ValueError("OpenMC eigenvalue result is missing k_eff data") from error
+
+    return spectrum

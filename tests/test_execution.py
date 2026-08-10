@@ -2,20 +2,49 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import subprocess
 
+import numpy as np
 import pytest
 
-from generate_mgxs import prepare, run_openmc, run_opensn
-from generate_mgxs.opensn import _convergence
+from generate_mgxs import (
+    Case,
+    load_mgxs,
+    load_opensn_result,
+    prepare,
+    run_openmc,
+    run_opensn,
+    solve_infinite_medium_eigenvalue,
+)
+from generate_mgxs.opensn import _convergence, _eigenvalue_convergence
 from conftest import (
     OPENMC_DATA,
     OPENMC_PYTHON,
     OPENSN,
+    OPENSN_FISSION_MGXS,
     OPENSN_MPI,
+    material,
     write_result,
     write_tiny_mgxs,
 )
+
+
+def eigenvalue_case(*, energy_groups=(1.0e-5, 1.0e6, 2.0e7)):
+    """Return a fast homogeneous eigenvalue definition for runner tests."""
+    return Case(
+        name="tiny_eigenvalue",
+        materials=(material(),),
+        energy_groups=energy_groups,
+        run_mode="eigenvalue",
+        target_dimensions_cm=(2.0, 2.0, 2.0),
+        batches=5,
+        inactive_batches=1,
+        particles_per_batch=10,
+        scattering_order=0,
+        keigen_tolerance=1.0e-8,
+        keigen_max_iterations=50,
+    )
 
 
 def executable_script(path: Path, body: str):
@@ -220,6 +249,26 @@ def test_generated_openmc_input_writes_native_model(one_case, tmp_path):
     assert (run / "openmc/model.xml").is_file()
 
 
+@pytest.mark.skipif(
+    not (OPENMC_PYTHON.is_file() and OPENMC_DATA.is_file()),
+    reason="supplied OpenMC runtime is unavailable",
+)
+def test_flattop_openmc_eigenvalue_input_writes_native_model(tmp_path):
+    """The production FlatTop definition constructs native XML without transport."""
+    from examples.flattop.case import CASE
+
+    run = prepare(CASE, tmp_path / "flattop", solvers=("openmc",))
+    run_openmc(
+        run,
+        cross_sections=OPENMC_DATA,
+        python_executable=OPENMC_PYTHON,
+        operation="write-input",
+        timeout=30,
+    )
+
+    assert (run / "openmc/model.xml").is_file()
+
+
 def prepared_fake_opensn(one_case, tmp_path, *, result=True):
     run = prepare(one_case, tmp_path / "run")
     write_tiny_mgxs(run / "openmc/mgxs.h5")
@@ -261,6 +310,142 @@ def test_opensn_requires_each_independent_domain_to_converge():
         # JSON key sorting may differ from execution order; domain validation
         # must remain order-independent.
         _convergence(output, 1.0e-8, 50, ("moderator", "target"))
+
+
+def test_opensn_eigenvalue_convergence_requires_exact_final_summary():
+    output = (
+        "PI iteration = 8, k_eff = 1.0123457, k_eff_change = 8.00000e-09, "
+        "status = converged\n"
+        "PI final, status = converged, k_eff = 1.0123457, "
+        "k_eff_change = 8.000000e-09, sweeps = 88\n"
+    )
+
+    parsed = _eigenvalue_convergence(
+        output,
+        1.0e-8,
+        50,
+        result_k_eff=1.01234569,
+        result_iterations=8,
+        result_sweeps=88,
+    )
+
+    assert parsed == pytest.approx((1.01234569, 8.0e-9, 8, 88))
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (
+            "PI iteration = 50, k_eff = 1.0, k_eff_change = 2e-7\n"
+            "PI final, status = iteration_limit, k_eff = 1.0000000, "
+            "k_eff_change = 2.000000e-07, sweeps = 500\n",
+            "status=iteration_limit",
+        ),
+        (
+            "PI iteration = 4, k_eff = 1.0, k_eff_change = 1e-9\n"
+            "PI final, status = failed, k_eff = 1.0000000, "
+            "k_eff_change = 1.000000e-09, sweeps = 40\n",
+            "status=failed",
+        ),
+        (
+            "PI iteration = 1, k_eff = 1.0, k_eff_change = 1e-9\n"
+            "PI final, status = not_run, k_eff = 1.0000000, "
+            "k_eff_change = 1.000000e-09, sweeps = 0\n",
+            "status=not_run",
+        ),
+        ("PI iteration = 4, k_eff = 1.0, k_eff_change = 1e-9\n", "missing PI final"),
+        (
+            "PI iteration = 4, k_eff = 1.0, k_eff_change = 2e-7\n"
+            "PI final, status = converged, k_eff = 1.0000000, "
+            "k_eff_change = 2.000000e-07, sweeps = 40\n",
+            "k_eff_change",
+        ),
+    ],
+)
+def test_opensn_eigenvalue_convergence_rejects_invalid_final_status(output, message):
+    with pytest.raises(RuntimeError, match=message):
+        _eigenvalue_convergence(
+            output,
+            1.0e-8,
+            50,
+            result_k_eff=1.0,
+            result_iterations=4 if "iteration_limit" not in output else 50,
+            result_sweeps=40 if "iteration_limit" not in output else 500,
+        )
+
+
+def test_opensn_eigenvalue_convergence_rejects_result_log_disagreement():
+    output = (
+        "PI iteration = 4, k_eff = 1.0000000, k_eff_change = 1e-9\n"
+        "PI final, status = converged, k_eff = 1.0000000, "
+        "k_eff_change = 1.000000e-09, sweeps = 40\n"
+    )
+    with pytest.raises(RuntimeError, match="k_eff disagrees"):
+        _eigenvalue_convergence(
+            output,
+            1.0e-8,
+            50,
+            result_k_eff=1.001,
+            result_iterations=4,
+            result_sweeps=40,
+        )
+
+
+def test_opensn_eigenvalue_convergence_enforces_power_iteration_limit():
+    output = (
+        "PI iteration = 51, k_eff = 1.0000000, k_eff_change = 1e-9\n"
+        "PI final, status = converged, k_eff = 1.0000000, "
+        "k_eff_change = 1.000000e-09, sweeps = 510\n"
+    )
+    with pytest.raises(RuntimeError, match="configured limit"):
+        _eigenvalue_convergence(
+            output,
+            1.0e-8,
+            50,
+            result_k_eff=1.0,
+            result_iterations=51,
+            result_sweeps=510,
+        )
+
+
+def test_run_opensn_loads_strict_eigenvalue_result(tmp_path):
+    case = eigenvalue_case()
+    run = prepare(case, tmp_path / "eigenvalue")
+    write_tiny_mgxs(run / "openmc/mgxs.h5")
+    result_path = run / "opensn/opensn_result.json"
+    result_path.write_text(json.dumps({
+        "run_mode": "eigenvalue",
+        "energy_bounds": list(case.energy_bounds_ev),
+        "flux": [0.25, 0.75],
+        "logical_domain": "one",
+        "solver": {
+            "converged": None,
+            "k_eff": 1.01234569,
+            "k_eff_change": None,
+            "power_iterations": 8,
+            "sweeps": 88,
+            "k_tolerance": 1.0e-8,
+            "maximum_iterations": 50,
+            "balance": 2.0e-12,
+        },
+    }))
+    output = (
+        "OpenSn version 1.0.1\n"
+        "PI iteration = 8, k_eff = 1.0123457, k_eff_change = 8.00000e-09\n"
+        "PI final, status = converged, k_eff = 1.0123457, "
+        "k_eff_change = 8.000000e-09, sweeps = 88\n"
+    )
+
+    result = run_opensn(run, executable=fake_opensn(tmp_path / "opensn", output))
+
+    assert result.run_mode == "eigenvalue"
+    assert result.k_eff == pytest.approx(1.01234569)
+    assert result.k_eff_change == pytest.approx(8.0e-9)
+    assert result.power_iterations == 8
+    assert result.sweeps == 88
+    assert result.residual is None
+    assert result.spectrum.values.sum() == pytest.approx(1.0)
+    assert load_opensn_result(result_path).k_eff == pytest.approx(1.01234569)
 
 
 def test_opensn_zero_return_nonconverged_is_rejected(one_case, tmp_path):
@@ -371,3 +556,37 @@ def test_generated_two_material_opensn_executes(two_case, tmp_path):
     assert document["domains"]["target"]["volume_cm3"] == pytest.approx(8.0)
     assert document["domains"]["moderator"]["block"] == 0
     assert document["domains"]["moderator"]["volume_cm3"] == pytest.approx(8.0)
+
+
+@pytest.mark.opensn
+@pytest.mark.skipif(
+    not (OPENSN.is_file() and OPENSN_FISSION_MGXS.is_file()),
+    reason="supplied OpenSn fissionable runtime fixture is unavailable",
+)
+def test_real_fissionable_direct_and_opensn_eigenvalues_agree(tmp_path):
+    """The reflected P0 OpenSn verification solves the direct MGXS equation."""
+    xs = load_mgxs(OPENSN_FISSION_MGXS, "set1", 294.0)
+    direct = solve_infinite_medium_eigenvalue(xs)
+    case = Case(
+        name="u235_84g",
+        materials=(material("set1"),),
+        energy_groups=tuple(xs.energy_bounds_ev),
+        run_mode="eigenvalue",
+        target_dimensions_cm=(2.0, 2.0, 2.0),
+        scattering_order=0,
+        keigen_tolerance=1.0e-10,
+        keigen_max_iterations=1000,
+        batches=5,
+        inactive_batches=1,
+        particles_per_batch=10,
+    )
+    run = prepare(case, tmp_path / "real_eigenvalue")
+    shutil.copyfile(OPENSN_FISSION_MGXS, run / "openmc/mgxs.h5")
+
+    opensn = run_opensn(run, executable=OPENSN, timeout=60)
+    difference = abs(opensn.k_eff - direct.k_eff)
+
+    assert difference < 6.0e-8  # OpenSn's final log reports seven decimal places.
+    assert opensn.spectrum.values.sum() == pytest.approx(1.0, abs=2.0e-14)
+    np.testing.assert_array_equal(opensn.spectrum.energy_bounds_ev, xs.energy_bounds_ev)
+    assert opensn.power_iterations <= case.keigen_max_iterations

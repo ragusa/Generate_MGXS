@@ -173,8 +173,10 @@ def test_grouped_source_validation(probabilities, message):
         ({"density_g_cm3": np.inf}, "density"),
         ({"temperature_k": np.nan}, "temperature"),
         ({"composition": ()}, "composition"),
-        ({"composition": (("H1", 0.5),)}, "sum to one"),
         ({"composition": (("H1", -0.1), ("H2", 1.1))}, "nonnegative"),
+        ({"composition": (("H1", 0.0), ("H2", 0.0))}, "not all zero"),
+        ({"composition": (("H1", np.nan),)}, "finite"),
+        ({"composition": (("H1", np.inf),)}, "finite"),
     ],
 )
 def test_material_scientific_validation(kwargs, message):
@@ -213,6 +215,20 @@ def test_natural_element_mixture_uses_one_composition_representation():
     )
 
     assert steel.composition == (("Fe", 0.98), ("C", 0.02))
+
+
+def test_relative_atom_amounts_are_preserved_without_normalization():
+    """Composition entries are OpenMC relative ao amounts, not a unit-sum vector."""
+    amounts = (
+        ("U234", 2.5759e-06),
+        ("U235", 3.4428e-04),
+        ("U238", 4.7441e-02),
+    )
+
+    flattop = Material("flattop_nu", "FlatTop_NU", 18.823124, amounts)
+
+    assert flattop.composition == amounts
+    assert sum(amount for _, amount in flattop.composition) != pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("identifier", ["iron", "Fe-56", "56Fe", "Fe!", "H0"])
@@ -264,9 +280,58 @@ def test_geometry_and_solver_controls_are_validated():
         ("gmres_tolerance", np.nan, "gmres_tolerance"),
         ("gmres_max_iterations", 0, "gmres_max_iterations"),
         ("gmres_restart", 0, "gmres_restart"),
+        ("keigen_tolerance", np.inf, "keigen_tolerance"),
+        ("keigen_max_iterations", 0, "keigen_max_iterations"),
     ):
         with pytest.raises(ValueError, match=message):
             Case(**(common | {field: value}))
+
+
+def test_case_run_modes_preserve_fixed_source_and_validate_eigenvalue():
+    common = dict(
+        name="mode",
+        materials=(material(),),
+        energy_groups=(1.0, 2.0),
+        target_dimensions_cm=(1.0, 1.0, 1.0),
+    )
+    fixed = Case(**common, source_kind="uniform_energy")
+    eigenvalue = Case(
+        **common,
+        run_mode="eigenvalue",
+        inactive_batches=2,
+        batches=5,
+    )
+
+    assert fixed.run_mode == "fixed_source"
+    assert fixed.source_definition == {"kind": "uniform_energy"}
+    assert eigenvalue.run_mode == "eigenvalue"
+    assert eigenvalue.source_kind is None
+    assert eigenvalue.source_definition is None
+    with pytest.raises(ValueError, match="no external source"):
+        _ = eigenvalue.source_probabilities
+
+    with pytest.raises(ValueError, match="require source kind"):
+        Case(**common)
+    with pytest.raises(ValueError, match="do not accept source_kind"):
+        Case(**common, run_mode="eigenvalue", source_kind="uniform_energy")
+    with pytest.raises(ValueError, match="inactive_batches=0"):
+        Case(**common, source_kind="uniform_energy", inactive_batches=1)
+    with pytest.raises(ValueError, match="less than batches"):
+        Case(**common, run_mode="eigenvalue", batches=3, inactive_batches=3)
+    with pytest.raises(ValueError, match="inactive_batches"):
+        Case(**common, run_mode="eigenvalue", inactive_batches=True)
+    with pytest.raises(ValueError, match="one homogeneous material"):
+        Case(
+            name="multi_eigenvalue",
+            materials=(
+                material("target", "target"),
+                material("moderator", "moderator"),
+            ),
+            energy_groups=(1.0, 2.0),
+            target_dimensions_cm=(1.0, 1.0, 1.0),
+            outer_dimensions_cm=(2.0, 2.0, 2.0),
+            run_mode="eigenvalue",
+        )
 
 
 def test_moderated_outer_dimensions_strictly_enclose_target():

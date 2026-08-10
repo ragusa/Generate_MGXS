@@ -4,7 +4,12 @@ import h5py
 import numpy as np
 import pytest
 
-from generate_mgxs import MGXS, load_mgxs, solve_infinite_medium
+from generate_mgxs import (
+    MGXS,
+    load_mgxs,
+    solve_infinite_medium,
+    solve_infinite_medium_eigenvalue,
+)
 from conftest import EVIDENCE, write_tiny_mgxs
 
 
@@ -243,3 +248,87 @@ def test_direct_solver_rejects_fissionable_mgxs():
 
     with pytest.raises(ValueError, match="non-fissionable homogeneous"):
         solve_infinite_medium(xs, [1.0], 1.0)
+
+
+def test_one_group_direct_eigenvalue_is_analytical():
+    """For one group, k is nu-Sigma-f divided by removal Sigma-t - Sigma-s."""
+    xs = MGXS(
+        np.array([1.0, 2.0]),
+        np.array([1.2]),
+        np.array([0.7]),
+        np.array([[[0.3]]]),
+        "fuel",
+        294.0,
+        fission=np.array([0.2]),
+        nu_fission=np.array([0.45]),
+        chi=np.array([1.0]),
+    )
+
+    solution = solve_infinite_medium_eigenvalue(xs)
+
+    assert solution.k_eff == pytest.approx(0.45 / (1.2 - 0.3))
+    np.testing.assert_array_equal(solution.spectrum.values, [1.0])
+    assert solution.residual < 1.0e-15
+
+
+def test_multigroup_direct_eigenvalue_matches_dense_numpy_reference():
+    """The rank-one reduction must match the independent generalized operator."""
+    scatter = np.array([[[0.5, 0.1], [0.2, 0.4]]])
+    xs = MGXS(
+        np.array([1.0, 2.0, 4.0]),
+        np.array([2.0, 3.0]),
+        np.array([1.3, 2.2]),
+        scatter,
+        "fuel",
+        294.0,
+        fission=np.array([0.3, 0.4]),
+        nu_fission=np.array([0.8, 1.1]),
+        chi=np.array([0.7, 0.3]),
+    )
+    operator = np.diag(xs.total) - scatter[0].T
+    production = np.outer(xs.chi, xs.nu_fission)
+    eigenvalues, eigenvectors = np.linalg.eig(np.linalg.solve(operator, production))
+    index = int(np.argmax(eigenvalues.real))
+    expected_k = float(eigenvalues[index].real)
+    expected_flux = eigenvectors[:, index].real
+    expected_flux *= np.sign(expected_flux.sum())
+    expected_flux /= expected_flux.sum()
+
+    solution = solve_infinite_medium_eigenvalue(xs)
+
+    assert solution.k_eff == pytest.approx(expected_k, rel=2.0e-15)
+    np.testing.assert_allclose(solution.spectrum.values, expected_flux, rtol=2.0e-15)
+    assert solution.spectrum.values.sum() == pytest.approx(1.0)
+    assert solution.residual < 1.0e-15
+
+
+def test_direct_eigenvalue_rejects_incomplete_or_invalid_fission_data():
+    nonfissionable = load_mgxs(BE9_HDF5, "be9")
+    with pytest.raises(ValueError, match="requires fission"):
+        solve_infinite_medium_eigenvalue(nonfissionable)
+
+    incomplete = MGXS(
+        np.array([1.0, 2.0]),
+        np.array([1.0]),
+        np.array([0.5]),
+        np.zeros((1, 1, 1)),
+        "incomplete",
+        294.0,
+        fission=np.array([0.1]),
+    )
+    with pytest.raises(ValueError, match="requires fission"):
+        solve_infinite_medium_eigenvalue(incomplete)
+
+    invalid_chi = MGXS(
+        np.array([1.0, 2.0]),
+        np.array([1.0]),
+        np.array([0.5]),
+        np.zeros((1, 1, 1)),
+        "invalid",
+        294.0,
+        fission=np.array([0.1]),
+        nu_fission=np.array([0.2]),
+        chi=np.array([0.5]),
+    )
+    with pytest.raises(ValueError, match="chi must be normalized"):
+        solve_infinite_medium_eigenvalue(invalid_chi)

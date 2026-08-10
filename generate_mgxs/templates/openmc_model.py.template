@@ -1,4 +1,4 @@
-"""Generated fixed-source OpenMC model and MGXS processing entry point.
+"""Generated OpenMC model and MGXS processing entry point.
 
 Run from this directory with ``python model.py run`` and later
 ``python model.py process``.  All paths below are relative to the prepared run.
@@ -22,8 +22,8 @@ MATERIALS = __MATERIALS__
 # caller ordering, determine target and moderator regions.
 GEOMETRY = __GEOMETRY__
 
-# This physical source is the sole authority for both continuous-energy OpenMC
-# sampling and the group probabilities derived by the OpenSn input.
+# Fixed-source cases use one physical authority for continuous OpenMC sampling
+# and derived OpenSn group probabilities. Eigenvalue cases store None here.
 PHYSICAL_SOURCE = __PHYSICAL_SOURCE__
 
 # OpenMC interprets particles as particles per batch, not total histories.
@@ -53,12 +53,14 @@ MGXS_TYPES = [
 
 CONFIG = {
     "case_name": CASE_NAME,
+    "run_mode": OPENMC_HISTORY_SETTINGS["run_mode"],
     "materials": MATERIALS,
     "geometry_type": GEOMETRY["type"],
     "target_dimensions_cm": GEOMETRY["target_dimensions_cm"],
     "outer_dimensions_cm": GEOMETRY["outer_dimensions_cm"],
     "boundaries": GEOMETRY["boundaries"],
     "batches": OPENMC_HISTORY_SETTINGS["batches"],
+    "inactive_batches": OPENMC_HISTORY_SETTINGS["inactive_batches"],
     "particles_per_batch": OPENMC_HISTORY_SETTINGS["particles_per_batch"],
     "scattering_order": MGXS_SETTINGS["scattering_order"],
 }
@@ -105,7 +107,10 @@ def source_probabilities():
     return masses
 
 
-SOURCE_PROBABILITIES_ASCENDING = source_probabilities()
+if CONFIG["run_mode"] == "fixed_source":
+    SOURCE_PROBABILITIES_ASCENDING = source_probabilities()
+else:
+    SOURCE_PROBABILITIES_ASCENDING = None
 
 
 # --- Materials, geometry, source, and tallies -----------------------------
@@ -129,7 +134,7 @@ def build_model():
             )
             add_component(
                 component["identifier"],
-                component["atom_fraction"],
+                component["atom_amount"],
                 percent_type="ao",
             )
 
@@ -193,43 +198,59 @@ def build_model():
 
     # --- Source and history controls --------------------------------------
     settings = openmc.Settings()
-    settings.run_mode = "fixed source"
+    settings.run_mode = (
+        "fixed source" if CONFIG["run_mode"] == "fixed_source" else "eigenvalue"
+    )
     settings.batches = CONFIG["batches"]
     settings.particles = CONFIG["particles_per_batch"]
     settings.temperature = {"default": CONFIG["materials"][0]["temperature_k"]}
 
-    source = openmc.IndependentSource()
-    source.space = openmc.stats.Box(
-        (-tdx / 2, -tdy / 2, -tdz / 2), (tdx / 2, tdy / 2, tdz / 2),
-        only_fissionable=False,
-    )
-    source.angle = openmc.stats.Isotropic()
-
-    # Continuous-energy sampling is built directly from PHYSICAL_SOURCE. The
-    # grouped vector above exists for the explicit grouped-source case only.
-    if PHYSICAL_SOURCE["kind"] == "uniform_energy":
-        source.energy = openmc.stats.Uniform(
-            ENERGY_BOUNDS_EV[0], ENERGY_BOUNDS_EV[-1]
+    if CONFIG["run_mode"] == "eigenvalue":
+        settings.inactive = CONFIG["inactive_batches"]
+        settings.temperature["method"] = "interpolation"
+        # An eigenvalue solve needs only a spatial starting population. OpenMC
+        # determines its energy distribution through fission generations.
+        source = openmc.IndependentSource(
+            space=openmc.stats.Box(
+                (-tdx / 2, -tdy / 2, -tdz / 2),
+                (tdx / 2, tdy / 2, tdz / 2),
+                only_fissionable=True,
+            )
         )
-    elif PHYSICAL_SOURCE["kind"] == "watt":
-        source.energy = openmc.stats.Watt(
-            a=PHYSICAL_SOURCE["a_mev"] * 1.0e6,
-            b=PHYSICAL_SOURCE["b_per_mev"] / 1.0e6,
-        )
-        source.constraints = {
-            "energy_bounds": (ENERGY_BOUNDS_EV[0], ENERGY_BOUNDS_EV[-1]),
-            "rejection_strategy": "resample",
-        }
+        settings.source = source
     else:
-        densities = SOURCE_PROBABILITIES_ASCENDING / np.diff(ENERGY_BOUNDS_EV)
-        source.energy = openmc.stats.Tabular(
-            ENERGY_BOUNDS_EV,
-            np.append(densities, densities[-1]),
-            interpolation="histogram",
+        source = openmc.IndependentSource()
+        source.space = openmc.stats.Box(
+            (-tdx / 2, -tdy / 2, -tdz / 2),
+            (tdx / 2, tdy / 2, tdz / 2),
+            only_fissionable=False,
         )
+        source.angle = openmc.stats.Isotropic()
 
-    source.particle = "neutron"
-    settings.source = [source]
+        # Continuous-energy sampling is built directly from PHYSICAL_SOURCE.
+        if PHYSICAL_SOURCE["kind"] == "uniform_energy":
+            source.energy = openmc.stats.Uniform(
+                ENERGY_BOUNDS_EV[0], ENERGY_BOUNDS_EV[-1]
+            )
+        elif PHYSICAL_SOURCE["kind"] == "watt":
+            source.energy = openmc.stats.Watt(
+                a=PHYSICAL_SOURCE["a_mev"] * 1.0e6,
+                b=PHYSICAL_SOURCE["b_per_mev"] / 1.0e6,
+            )
+            source.constraints = {
+                "energy_bounds": (ENERGY_BOUNDS_EV[0], ENERGY_BOUNDS_EV[-1]),
+                "rejection_strategy": "resample",
+            }
+        else:
+            densities = SOURCE_PROBABILITIES_ASCENDING / np.diff(ENERGY_BOUNDS_EV)
+            source.energy = openmc.stats.Tabular(
+                ENERGY_BOUNDS_EV,
+                np.append(densities, densities[-1]),
+                interpolation="histogram",
+            )
+
+        source.particle = "neutron"
+        settings.source = [source]
     model.settings = settings
 
     # --- MGXS tallies ------------------------------------------------------
@@ -244,9 +265,9 @@ def build_model():
     # Export Legendre moments explicitly. OpenMC combines the consistent
     # scatter pair into the scatter and multiplicity matrices read by OpenSn.
     library.scatter_format = "legendre"
-    library.legendre_order = CONFIG["scattering_order"]
     # The direct and OpenSn equations use physical total, not P0-corrected transport.
     library.correction = None
+    library.legendre_order = CONFIG["scattering_order"]
     library.check_library_for_openmc_mgxs()
     library.build_library()
 
@@ -297,6 +318,12 @@ def process_statepoint(statepoint=None):
 
     # Load tally realizations before exporting either means or uncertainties.
     with openmc.StatePoint(statepoint) as statepoint_file:
+        statepoint_run_mode = statepoint_file.run_mode
+        if statepoint_run_mode != MODEL.settings.run_mode:
+            raise ValueError(
+                "statepoint run mode does not match the generated OpenMC model"
+            )
+        statepoint_keff = statepoint_file.keff
         MGXS_LIBRARY.load_from_statepoint(statepoint_file)
 
     # mgxs.h5 is the only cross-section handoff consumed by generated OpenSn.
@@ -395,6 +422,14 @@ def process_statepoint(statepoint=None):
         "logical_domain": primary,
         "domains": spectra,
     }
+    if CONFIG["run_mode"] == "eigenvalue":
+        if statepoint_keff is None:
+            raise ValueError("eigenvalue statepoint does not contain k_eff")
+        result.update({
+            "run_mode": "eigenvalue",
+            "k_eff": float(statepoint_keff.nominal_value),
+            "k_eff_std_dev": float(statepoint_keff.std_dev),
+        })
     (OPENMC_DIRECTORY / "openmc_result.json").write_text(
         json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
     )

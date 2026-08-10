@@ -29,9 +29,12 @@ def _write_opensn_input(case: Case, path: Path) -> None:
     ]
 
     numerical = {
+        "run_mode": case.run_mode,
         "gmres_tolerance": case.gmres_tolerance,
         "gmres_max_iterations": case.gmres_max_iterations,
         "gmres_restart": case.gmres_restart,
+        "keigen_tolerance": case.keigen_tolerance,
+        "keigen_max_iterations": case.keigen_max_iterations,
     }
 
     # Keep the OpenSn API program in package data; this module only maps the
@@ -68,6 +71,19 @@ _PETSC_RESIDUAL = re.compile(
     r"^\s*(\d+)\s+KSP\s+Residual\s+norm\s+"
     r"([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)",
     re.IGNORECASE | re.MULTILINE,
+)
+_PI_ITERATION = re.compile(
+    r"\bPI\s+iteration\s*=\s*(\d+)\s*,\s*k_eff\s*=\s*"
+    r"([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)\s*,\s*k_eff_change\s*=\s*"
+    r"([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)",
+    re.IGNORECASE,
+)
+_PI_FINAL = re.compile(
+    r"\bPI\s+final\s*,\s*status\s*=\s*([A-Za-z_]+)\s*,\s*"
+    r"k_eff\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)\s*,\s*"
+    r"k_eff_change\s*=\s*([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)\s*,\s*"
+    r"sweeps\s*=\s*(\d+)",
+    re.IGNORECASE,
 )
 
 
@@ -138,6 +154,51 @@ def _convergence(
     # The result-level summary is deliberately conservative; each domain has
     # already passed the same explicit status, residual, and iteration checks.
     return max(item[0] for item in metrics), max(item[1] for item in metrics)
+
+
+def _eigenvalue_convergence(
+    output: str,
+    tolerance: float,
+    maximum_iterations: int,
+    *,
+    result_k_eff: float,
+    result_iterations: int,
+    result_sweeps: int,
+):
+    """Require OpenSn's final power-iteration convergence record."""
+    finals = _PI_FINAL.findall(output)
+    iterations = _PI_ITERATION.findall(output)
+    if len(finals) != 1 or not iterations:
+        raise RuntimeError("OpenSn eigenvalue convergence is unknown: missing PI final")
+
+    status, parsed_k, parsed_change, parsed_sweeps = finals[0]
+    parsed_k = float(parsed_k)
+    parsed_change = float(parsed_change)
+    parsed_sweeps = int(parsed_sweeps)
+    logged_iterations = int(iterations[-1][0])
+
+    if status.lower() != "converged":
+        raise RuntimeError(f"OpenSn eigenvalue did not converge: status={status}")
+    if parsed_change > tolerance:
+        raise RuntimeError(
+            "OpenSn eigenvalue did not converge: "
+            f"k_eff_change={parsed_change:.8g}, tolerance={tolerance:.8g}"
+        )
+    if result_iterations < 1 or result_iterations > maximum_iterations:
+        raise RuntimeError(
+            "OpenSn eigenvalue power-iteration count exceeds its configured limit"
+        )
+    if logged_iterations != result_iterations:
+        raise RuntimeError("OpenSn eigenvalue iteration count disagrees with its log")
+    if parsed_sweeps != result_sweeps:
+        raise RuntimeError("OpenSn eigenvalue sweep count disagrees with its log")
+    if not np.isclose(parsed_k, result_k_eff, rtol=0.0, atol=5.1e-8):
+        # OpenSn formats the final value with seven digits after the decimal.
+        raise RuntimeError("OpenSn eigenvalue result k_eff disagrees with its log")
+
+    # Preserve the full-precision value written by GetEigenvalue(); the parsed
+    # value is only independent convergence evidence at log precision.
+    return result_k_eff, parsed_change, result_iterations, parsed_sweeps
 
 
 def run_opensn(
@@ -225,20 +286,47 @@ def run_opensn(
     try:
         document = json.loads(result_path.read_text())
         solver = document["solver"]
-        tolerance = float(solver["tolerance"])
-        maximum = int(solver["maximum_iterations"])
+        run_mode = document.get("run_mode", "fixed_source")
         domains = document.get("domains", {})
         if not isinstance(domains, dict):
             raise TypeError("domains must be an object")
+        if run_mode == "eigenvalue":
+            tolerance = float(solver["k_tolerance"])
+            maximum = int(solver["maximum_iterations"])
+            result_k_eff = float(solver["k_eff"])
+            result_iterations = int(solver["power_iterations"])
+            result_sweeps = int(solver["sweeps"])
+        elif run_mode == "fixed_source":
+            tolerance = float(solver["tolerance"])
+            maximum = int(solver["maximum_iterations"])
+        else:
+            raise ValueError("unknown run_mode")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("OpenSn result is malformed") from error
 
-    # A low residual is accepted only when the log also reports explicit
-    # convergence within the configured iteration limit.
-    iterations, residual = _convergence(
-        output, tolerance, maximum, tuple(domains)
-    )
-    solver.update(converged=True, iterations=iterations, residual=residual)
+    if run_mode == "eigenvalue":
+        parsed_k, change, iterations, sweeps = _eigenvalue_convergence(
+            output,
+            tolerance,
+            maximum,
+            result_k_eff=result_k_eff,
+            result_iterations=result_iterations,
+            result_sweeps=result_sweeps,
+        )
+        solver.update(
+            converged=True,
+            k_eff=parsed_k,
+            k_eff_change=change,
+            power_iterations=iterations,
+            sweeps=sweeps,
+        )
+    else:
+        # A low residual is accepted only when the log also reports explicit
+        # convergence within the configured iteration limit.
+        iterations, residual = _convergence(
+            output, tolerance, maximum, tuple(domains)
+        )
+        solver.update(converged=True, iterations=iterations, residual=residual)
 
     result_path.write_text(
         json.dumps(document, indent=2, sort_keys=True, allow_nan=False) + "\n"
@@ -259,9 +347,8 @@ def load_opensn_result(path) -> OpenSnResult:
     document = json.loads(path.read_text())
     solver = document.get("solver", {})
     converged = solver.get("converged")
-    iterations = solver.get("iterations", solver.get("iteration_count"))
-    residual = solver.get("residual", solver.get("final_residual"))
-    if converged is not True or iterations is None or residual is None:
+    run_mode = document.get("run_mode", "fixed_source")
+    if converged is not True:
         raise RuntimeError("OpenSn result does not explicitly report convergence")
 
     # Generated OpenSn files reverse solver-native high-to-low fields before
@@ -283,11 +370,38 @@ def load_opensn_result(path) -> OpenSnResult:
             for name, record in document["domains"].items()
         }
 
+    balance = float(solver["balance"]) if solver.get("balance") is not None else None
+    if run_mode == "eigenvalue":
+        required = ("k_eff", "k_eff_change", "power_iterations", "sweeps")
+        if any(solver.get(name) is None for name in required):
+            raise RuntimeError(
+                "OpenSn eigenvalue result does not explicitly report convergence"
+            )
+        if np.any(primary.values < 0.0) or not np.isclose(
+            primary.values.sum(), 1.0, rtol=0.0, atol=1.0e-12
+        ):
+            raise ValueError("OpenSn eigenvalue spectrum must be nonnegative and normalized")
+        return OpenSnResult(
+            primary,
+            True,
+            balance=balance,
+            domain_spectra=domains,
+            run_mode="eigenvalue",
+            k_eff=solver["k_eff"],
+            k_eff_change=solver["k_eff_change"],
+            power_iterations=solver["power_iterations"],
+            sweeps=solver["sweeps"],
+        )
+
+    iterations = solver.get("iterations", solver.get("iteration_count"))
+    residual = solver.get("residual", solver.get("final_residual"))
+    if iterations is None or residual is None:
+        raise RuntimeError("OpenSn result does not explicitly report convergence")
     return OpenSnResult(
         primary,
         True,
         int(iterations),
         float(residual),
-        float(solver["balance"]) if solver.get("balance") is not None else None,
+        balance,
         domains,
     )

@@ -14,6 +14,7 @@ OPENMC_PYTHON = Path("/home/ragusa/miniforge3/envs/openmc-env/bin/python")
 OPENMC_DATA = Path("/home/ragusa/xs/endfb-viii.0-hdf5/cross_sections.xml")
 OPENSN = Path("/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console")
 OPENSN_MPI = Path("/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-mpiexec")
+OPENSN_FISSION_MGXS = Path("/home/ragusa/repo/opensn/test/assets/xs/u235_84g.h5")
 EVIDENCE = Path(__file__).parent / "data"
 
 
