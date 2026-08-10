@@ -370,5 +370,46 @@ def test_history_semantics_match_reference_case_definitions():
     )
 
 
+def test_hdpe_example_retains_the_benchmark_definition():
+    from examples.hdpe.case import CASE, HDPE
+
+    assert CASE.materials == (HDPE,)
+    assert (
+        HDPE.logical_name,
+        HDPE.name,
+        HDPE.density_g_cm3,
+        HDPE.composition,
+        HDPE.thermal_scattering,
+        HDPE.temperature_k,
+    ) == (
+        "hdpe",
+        "HDPE",
+        0.955,
+        (("H1", 0.667), ("C", 0.333)),
+        ("c_H_in_CH2",),
+        294.0,
+    )
+    assert CASE.energy_group_structure == "SHEM-361"
+    np.testing.assert_array_equal(CASE.energy_bounds_ev, energy_bounds("SHEM-361"))
+    assert (CASE.geometry_type, CASE.run_mode, CASE.source_kind) == (
+        "homogeneous",
+        "fixed_source",
+        "uniform_energy",
+    )
+    assert CASE.target_dimensions_cm == (2.0, 2.0, 100.0)
+    assert CASE.boundaries == ("reflective",) * 6
+    assert (CASE.particles_per_batch, CASE.batches, CASE.total_histories) == (
+        50_000,
+        40,
+        2_000_000,
+    )
+    assert CASE.scattering_order == 3
+    assert (CASE.gmres_tolerance, CASE.gmres_max_iterations, CASE.gmres_restart) == (
+        1.0e-9,
+        300,
+        100,
+    )
+
+
 def test_source_volume_is_target_volume(two_case):
     assert two_case.source_volume_cm3 == pytest.approx(0.064)

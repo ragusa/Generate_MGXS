@@ -160,10 +160,10 @@ The returned dictionary contains the applicable cross-section, chi,
 scattering-moment, and derived fission-production figures. Energy axes use the
 package's ascending-eV convention; plotting never requires OpenSn.
 
-Complete, commented Be-9, UO2-in-HDPE, homogeneous FlatTop, detector, and
-Pu9+HDPE definitions are in `examples/`. The detector and Pu9+HDPE cases use
-the OpenMC-only concentric geometry. FlatTop uses `run_mode="eigenvalue"`; its
-direct comparison is:
+Complete, commented Be-9, homogeneous HDPE, UO2-in-HDPE, homogeneous FlatTop,
+detector, and Pu9+HDPE definitions are in `examples/`. The detector and
+Pu9+HDPE cases use the OpenMC-only concentric geometry. FlatTop uses
+`run_mode="eigenvalue"`; its direct comparison is:
 
 ```python
 direct = solve_infinite_medium_eigenvalue(mgxs)
