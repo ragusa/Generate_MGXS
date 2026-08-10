@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from hashlib import sha256
 from importlib import resources
 import json
@@ -221,9 +222,7 @@ def run_openmc(
 
 def load_openmc_result(path) -> Spectrum | OpenMCEigenvalueResult:
     """Load a compact fixed-source spectrum or OpenMC eigenvalue result."""
-    path = Path(path)
-    if path.is_dir():
-        path = path / "openmc" / "openmc_result.json"
+    path = _openmc_result_path(path)
 
     document = json.loads(path.read_text())
     if "std_dev" not in document:
@@ -246,3 +245,81 @@ def load_openmc_result(path) -> Spectrum | OpenMCEigenvalueResult:
             raise ValueError("OpenMC eigenvalue result is missing k_eff data") from error
 
     return spectrum
+
+
+def _openmc_result_path(path) -> Path:
+    """Resolve a run directory or explicit OpenMC result path."""
+    path = Path(path)
+    if path.is_dir():
+        return path / "openmc" / "openmc_result.json"
+    return path
+
+
+def _openmc_domain_order(document, result_path: Path) -> tuple[str, ...]:
+    """Read explicit domain order, falling back to prepared-run metadata."""
+    domains = document.get("domains")
+    if not isinstance(domains, dict) or not domains:
+        raise ValueError("OpenMC result does not contain domain spectra")
+
+    order = document.get("domain_order")
+    if order is None:
+        metadata_path = result_path.parent.parent / "_metadata" / "run.json"
+        if metadata_path.is_file():
+            metadata = json.loads(metadata_path.read_text())
+            records = metadata.get("case", {}).get("mgxs_domains", ())
+            metadata_order = tuple(
+                item.get("xsdata_name")
+                for item in records
+                if isinstance(item, dict)
+            )
+            if set(metadata_order) == set(domains):
+                order = metadata_order
+
+    # Old standalone result files have no explicit ordering information. Their
+    # JSON object order is the only available deterministic fallback.
+    if order is None:
+        order = tuple(domains)
+
+    if isinstance(order, (str, bytes)):
+        raise ValueError("OpenMC result has invalid domain ordering")
+    try:
+        order = tuple(order)
+    except TypeError as error:
+        raise ValueError("OpenMC result has invalid domain ordering") from error
+    if (
+        not all(isinstance(name, str) for name in order)
+        or len(set(order)) != len(order)
+        or set(order) != set(domains)
+    ):
+        raise ValueError("OpenMC result has invalid domain ordering")
+    return tuple(order)
+
+
+def load_openmc_domain_spectra(path) -> OrderedDict[str, Spectrum]:
+    """Load every OpenMC MGXS-domain spectrum in declared domain order."""
+    result_path = _openmc_result_path(path)
+    document = json.loads(result_path.read_text())
+    if "energy_bounds" not in document:
+        raise ValueError("OpenMC result does not contain energy boundaries")
+
+    bounds = np.asarray(document["energy_bounds"], dtype=float)
+    domains = document.get("domains")
+    order = _openmc_domain_order(document, result_path)
+    spectra = OrderedDict()
+    for name in order:
+        record = domains[name]
+        if not isinstance(record, dict) or "std_dev" not in record:
+            raise ValueError(
+                f"OpenMC domain {name!r} does not contain statistical uncertainty"
+            )
+        try:
+            spectra[name] = Spectrum(
+                bounds,
+                np.asarray(record["flux"], dtype=float),
+                np.asarray(record["std_dev"], dtype=float),
+                name,
+            )
+        except KeyError as error:
+            raise ValueError(f"OpenMC domain {name!r} is missing flux data") from error
+
+    return spectra

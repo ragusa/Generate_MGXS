@@ -8,7 +8,13 @@ from matplotlib.colors import LogNorm
 import numpy as np
 import pytest
 
-from generate_mgxs import MGXS, Spectrum, plot_mgxs, plot_spectra
+from generate_mgxs import (
+    MGXS,
+    Spectrum,
+    plot_mgxs,
+    plot_openmc_domain_spectra,
+    plot_spectra,
+)
 
 
 def synthetic_mgxs(*, fissionable=False, zero_lower_bound=False):
@@ -294,6 +300,95 @@ def test_plot_spectra_accepts_openmc_only():
     plt.close("all")
 
 
+def test_plot_openmc_domains_normalizes_each_shape_and_uses_line_steps(tmp_path):
+    bounds = np.array([1.0, 2.0, 4.0])
+    domain_spectra = {
+        "he3": Spectrum(bounds, [2.0, 0.0], std_dev=[0.2, 0.0], logical_domain="he3"),
+        "hdpe": Spectrum(bounds, [2.0, 6.0], std_dev=[0.2, 0.6], logical_domain="hdpe"),
+        "cad": Spectrum(bounds, [1.0, 1.0], std_dev=[0.1, 0.1], logical_domain="cad"),
+        "alu": Spectrum(bounds, [9.0, 1.0], std_dev=[0.9, 0.1], logical_domain="alu"),
+        "outer": Spectrum(bounds, [20.0, 60.0], std_dev=[2.0, 6.0], logical_domain="outer"),
+    }
+    labels = {
+        "he3": "He3",
+        "hdpe": "Hdpe",
+        "cad": "Cadmium",
+        "alu": "Alu",
+        "outer": "Outer",
+    }
+    originals = {
+        name: (
+            spectrum.energy_bounds_ev.copy(),
+            spectrum.values.copy(),
+            spectrum.std_dev.copy(),
+        )
+        for name, spectrum in domain_spectra.items()
+    }
+
+    figures = plot_openmc_domain_spectra(
+        domain_spectra,
+        labels=labels,
+        output_directory=tmp_path,
+    )
+
+    assert set(figures) == {
+        "openmc_domain_flux_spectra",
+        "openmc_domain_lethargy_spectra",
+    }
+    assert {path.name for path in tmp_path.glob("*.png")} == {
+        "openmc_domain_flux_spectra.png",
+        "openmc_domain_lethargy_spectra.png",
+    }
+
+    widths = np.diff(bounds)
+    midpoints = bounds[:-1] + 0.5 * widths
+    energy_axis = figures["openmc_domain_flux_spectra"].axes[0]
+    lethargy_axis = figures["openmc_domain_lethargy_spectra"].axes[0]
+    assert energy_axis.get_xscale() == energy_axis.get_yscale() == "log"
+    assert lethargy_axis.get_xscale() == "log"
+    assert lethargy_axis.get_yscale() == "linear"
+    assert [line.get_label() for line in energy_axis.lines] == list(labels.values())
+    assert not energy_axis.patches
+    assert not lethargy_axis.patches
+
+    for name, spectrum in domain_spectra.items():
+        label = labels[name]
+        energy_line = labelled_line(energy_axis, label)
+        lethargy_line = labelled_line(lethargy_axis, label)
+        energy_values = spectrum.normalized / widths
+        expected_energy = np.append(energy_values, energy_values[-1])
+        expected_energy[expected_energy <= 0.0] = np.nan
+        expected_lethargy = np.append(
+            midpoints * energy_values,
+            (midpoints * energy_values)[-1],
+        )
+
+        assert np.sum(spectrum.normalized) == pytest.approx(1.0)
+        assert energy_line.get_drawstyle() == "steps-post"
+        assert lethargy_line.get_drawstyle() == "steps-post"
+        np.testing.assert_array_equal(energy_line.get_xdata(), bounds)
+        np.testing.assert_allclose(
+            energy_line.get_ydata(),
+            expected_energy,
+            equal_nan=True,
+        )
+        np.testing.assert_allclose(lethargy_line.get_ydata(), expected_lethargy)
+
+    # Proportional raw tallies overlay after independent shape normalization,
+    # while their distinct domain identities remain in the legend.
+    np.testing.assert_allclose(
+        labelled_line(energy_axis, "Hdpe").get_ydata(),
+        labelled_line(energy_axis, "Outer").get_ydata(),
+    )
+    for name, spectrum in domain_spectra.items():
+        original_bounds, original_values, original_std = originals[name]
+        np.testing.assert_array_equal(spectrum.energy_bounds_ev, original_bounds)
+        np.testing.assert_array_equal(spectrum.values, original_values)
+        np.testing.assert_array_equal(spectrum.std_dev, original_std)
+
+    plt.close("all")
+
+
 def test_plot_spectra_rejects_requested_missing_result():
     openmc, _, direct = comparison_spectra()
 
@@ -542,6 +637,8 @@ def test_fissionable_mgxs_vectors_use_explicit_step_line_data_without_mutation()
 
     assert axis.get_xscale() == "log"
     assert axis.get_yscale() == "log"
+    assert any(line.get_visible() for line in axis.get_xgridlines())
+    assert any(line.get_visible() for line in axis.get_ygridlines())
     np.testing.assert_array_equal(mgxs.energy_bounds_ev, original_bounds)
     np.testing.assert_array_equal(mgxs.total, expected["Total"])
     np.testing.assert_array_equal(mgxs.absorption, expected["Absorption"])
@@ -587,6 +684,8 @@ def test_cross_section_log_y_masks_zeros_without_mutation():
     chi_axis = figures["chi"].axes[0]
     assert chi_axis.get_xscale() == "log"
     assert chi_axis.get_yscale() == "linear"
+    assert any(line.get_visible() for line in chi_axis.get_xgridlines())
+    assert any(line.get_visible() for line in chi_axis.get_ygridlines())
     assert len(chi_axis.patches) == 0
     chi_line = chi_axis.lines[0]
     np.testing.assert_array_equal(chi_line.get_xdata(), mgxs.energy_bounds_ev)
@@ -646,6 +745,8 @@ def test_p0_scattering_uses_log_color_and_masks_zero_without_mutation():
     assert matrix_axis.get_xscale() == matrix_axis.get_yscale() == "linear"
     assert matrix_axis.get_xlim() == pytest.approx((0.5, 3.5))
     assert matrix_axis.get_ylim() == pytest.approx((3.5, 0.5))
+    assert any(line.get_visible() for line in matrix_axis.get_xgridlines())
+    assert any(line.get_visible() for line in matrix_axis.get_ygridlines())
     assert "(log scale)" in figures["scatter_p0"].axes[1].get_ylabel()
     assert not any(
         issubclass(item.category, RuntimeWarning)

@@ -10,6 +10,7 @@ from generate_mgxs import (
     Case,
     Material,
     Spectrum,
+    load_openmc_domain_spectra,
     load_openmc_result,
     load_opensn_result,
     prepare,
@@ -470,6 +471,71 @@ def test_load_openmc_seed_preserves_standard_deviation():
     assert result.values.shape == result.std_dev.shape == (69,)
     assert np.all(result.std_dev > 0.0)
     assert np.all(np.diff(result.energy_bounds_ev) > 0.0)
+
+
+def test_load_all_openmc_domains_in_declared_order_without_material_aliasing(
+    tmp_path,
+):
+    """Run metadata restores declaration order for pre-domain_order results."""
+    run = tmp_path / "run"
+    result_path = run / "openmc" / "openmc_result.json"
+    metadata_path = run / "_metadata" / "run.json"
+    result_path.parent.mkdir(parents=True)
+    metadata_path.parent.mkdir(parents=True)
+
+    records = {
+        "alu": {"flux": [4.0, 1.0], "std_dev": [0.4, 0.1]},
+        "cad": {"flux": [3.0, 2.0], "std_dev": [0.3, 0.2]},
+        "hdpe": {"flux": [2.0, 3.0], "std_dev": [0.2, 0.3]},
+        "he3": {"flux": [1.0, 4.0], "std_dev": [0.1, 0.4]},
+        "outer": {"flux": [5.0, 0.5], "std_dev": [0.5, 0.05]},
+    }
+    result_path.write_text(json.dumps({
+        "energy_bounds": [1.0, 2.0, 5.0],
+        "flux": records["he3"]["flux"],
+        "std_dev": records["he3"]["std_dev"],
+        "logical_domain": "he3",
+        "domains": records,
+    }, sort_keys=True))
+    metadata_path.write_text(json.dumps({
+        "case": {
+            "mgxs_domains": [
+                {
+                    "xsdata_name": name,
+                    "material_logical_name": material,
+                }
+                for name, material in (
+                    ("he3", "he3_material"),
+                    ("hdpe", "hdpe_material"),
+                    ("cad", "cadmium_material"),
+                    ("alu", "aluminum_material"),
+                    ("outer", "hdpe_material"),
+                )
+            ]
+        }
+    }))
+
+    domains = load_openmc_domain_spectra(run)
+
+    assert list(domains) == ["he3", "hdpe", "cad", "alu", "outer"]
+    assert domains["hdpe"] is not domains["outer"]
+    for name, spectrum in domains.items():
+        assert spectrum.logical_domain == name
+        np.testing.assert_array_equal(spectrum.energy_bounds_ev, [1.0, 2.0, 5.0])
+        np.testing.assert_array_equal(spectrum.values, records[name]["flux"])
+        np.testing.assert_array_equal(spectrum.std_dev, records[name]["std_dev"])
+
+    # The original primary-only API remains unchanged.
+    primary = load_openmc_result(run)
+    assert isinstance(primary, Spectrum)
+    assert primary.logical_domain == "he3"
+    np.testing.assert_array_equal(primary.values, records["he3"]["flux"])
+
+
+def test_generated_openmc_result_records_domain_order(one_case, tmp_path):
+    model = (prepare(one_case, tmp_path / "run") / "openmc/model.py").read_text()
+
+    assert '"domain_order": [item["xsdata_name"] for item in MGXS_DOMAINS]' in model
 
 
 def test_load_openmc_eigenvalue_result_preserves_keff_and_raw_flux(tmp_path):

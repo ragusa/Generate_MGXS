@@ -507,6 +507,7 @@ def process_statepoint(statepoint=None):
         "flux": spectra[primary]["flux"],
         "std_dev": spectra[primary]["std_dev"],
         "logical_domain": primary,
+        "domain_order": [item["xsdata_name"] for item in MGXS_DOMAINS],
         "domains": spectra,
     }
     if CONFIG["run_mode"] == "eigenvalue":

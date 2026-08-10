@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 import re
 import warnings
@@ -9,6 +10,7 @@ import warnings
 import numpy as np
 
 from .mgxs import MGXS
+from .results import Spectrum
 
 
 _LOG_PLOT_MINIMUM_EV = 1.0e-5
@@ -317,6 +319,111 @@ def _positive_magnitudes(values):
     return plotted
 
 
+def plot_openmc_domain_spectra(
+    domain_spectra,
+    *,
+    labels=None,
+    output_directory=None,
+    show=False,
+):
+    """Plot independently normalized OpenMC spectra for multiple MGXS domains."""
+    if not isinstance(domain_spectra, Mapping) or not domain_spectra:
+        raise ValueError("domain_spectra must be a nonempty mapping")
+    if labels is not None and not isinstance(labels, Mapping):
+        raise ValueError("labels must be a mapping from domain names to labels")
+
+    items = tuple(domain_spectra.items())
+    for name, spectrum in items:
+        if not isinstance(name, str) or not name:
+            raise ValueError("domain spectrum names must be nonempty strings")
+        if not isinstance(spectrum, Spectrum):
+            raise TypeError("domain spectrum values must be Spectrum objects")
+
+    reference_name, reference = items[0]
+    physical_bounds = np.asarray(reference.energy_bounds_ev)
+    for name, spectrum in items[1:]:
+        if not np.array_equal(spectrum.energy_bounds_ev, physical_bounds):
+            raise ValueError(
+                f"{name} and {reference_name} must have identical energy bounds"
+            )
+
+    if labels is not None and not set(domain_spectra).issubset(labels):
+        missing = next(name for name in domain_spectra if name not in labels)
+        raise ValueError(f"labels does not contain domain {missing!r}")
+
+    plotting_bounds = _plot_energy_bounds(physical_bounds)
+    widths = np.diff(physical_bounds)
+    midpoints = physical_bounds[:-1] + 0.5 * widths
+    normalized = {
+        name: spectrum.normalized
+        for name, spectrum in items
+    }
+    energy_spectra = {
+        name: values / widths
+        for name, values in normalized.items()
+    }
+    lethargy_spectra = {
+        name: midpoints * values
+        for name, values in energy_spectra.items()
+    }
+
+    output = None if output_directory is None else Path(output_directory)
+    if output is not None:
+        output.mkdir(parents=True, exist_ok=True)
+
+    import matplotlib.pyplot as plt
+
+    figures = {}
+
+    figure, axis = plt.subplots()
+    for name, values in energy_spectra.items():
+        display_label = name if labels is None else labels[name]
+        values_plot = _positive_magnitudes(np.append(values, values[-1]))
+        axis.plot(
+            plotting_bounds,
+            values_plot,
+            drawstyle="steps-post",
+            linewidth=1,
+            label=display_label,
+        )
+    axis.set_xscale("log")
+    axis.set_yscale("log")
+    axis.set_xlabel("Energy [eV]")
+    axis.set_ylabel("Normalized flux spectrum [1/eV]")
+    axis.grid(True, which="both", alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figures["openmc_domain_flux_spectra"] = figure
+
+    figure, axis = plt.subplots()
+    for name, values in lethargy_spectra.items():
+        display_label = name if labels is None else labels[name]
+        axis.plot(
+            plotting_bounds,
+            np.append(values, values[-1]),
+            drawstyle="steps-post",
+            linewidth=1,
+            label=display_label,
+        )
+    axis.set_xscale("log")
+    axis.set_yscale("linear")
+    axis.set_xlabel("Energy [eV]")
+    axis.set_ylabel("Normalized flux per unit lethargy")
+    axis.grid(True, which="both", alpha=0.3)
+    axis.legend()
+    figure.tight_layout()
+    figures["openmc_domain_lethargy_spectra"] = figure
+
+    if output is not None:
+        for name, figure in figures.items():
+            figure.savefig(output / f"{name}.png")
+
+    if show:
+        plt.show()
+
+    return figures
+
+
 def _plot_group_matrix(
     values_gin_gout,
     *,
@@ -384,6 +491,7 @@ def _plot_group_matrix(
         ticks = np.unique(np.rint(np.linspace(1, groups, 9)).astype(int))
     axis.set_xticks(ticks)
     axis.set_yticks(ticks)
+    axis.grid(True, which="both", alpha=0.3)
 
     colorbar = figure.colorbar(mesh, ax=axis)
     colorbar.set_label(colorbar_label)
@@ -466,6 +574,7 @@ def plot_mgxs(
     axis.set_xlabel("Energy [eV]")
     axis.set_ylabel("Cross section [cm^-1]")
     axis.set_title(f"{mgxs.logical_domain} MGXS cross sections")
+    axis.grid(True, which="both", alpha=0.3)
     axis.legend()
     figure.tight_layout()
     figures["cross_sections"] = figure
@@ -485,6 +594,7 @@ def plot_mgxs(
         axis.set_xlabel("Energy [eV]")
         axis.set_ylabel("Chi")
         axis.set_title(f"{mgxs.logical_domain} fission spectrum")
+        axis.grid(True, which="both", alpha=0.3)
         figure.tight_layout()
         figures["chi"] = figure
 

@@ -5,8 +5,10 @@ from pathlib import Path
 
 from generate_mgxs import (
     load_mgxs,
+    load_openmc_domain_spectra,
     load_openmc_result,
     plot_mgxs,
+    plot_openmc_domain_spectra,
     plot_spectra,
     prepare,
     run_openmc,
@@ -43,5 +45,18 @@ plot_spectra(
     None,
     None,
     include=("openmc",),
+    output_directory=plots,
+)
+
+# Compare independently normalized spectral shapes in every cell domain. The
+# XSdata name, not physical material identity, keeps Hdpe and Outer distinct.
+domain_spectra = load_openmc_domain_spectra(run_path)
+domain_labels = {
+    cell.xsdata_name: cell.name
+    for cell in CASE.geometry.domains
+}
+plot_openmc_domain_spectra(
+    domain_spectra,
+    labels=domain_labels,
     output_directory=plots,
 )
