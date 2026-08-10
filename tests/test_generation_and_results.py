@@ -63,6 +63,37 @@ def test_openmc_input_is_scientifically_readable(one_case, tmp_path):
     assert text.index("OPENMC_HISTORY_SETTINGS") < text.index("ENERGY_BOUNDS_EV =")
 
 
+def test_generated_openmc_uses_exact_solver_mgxs_contract(one_case, tmp_path):
+    """Only fields consumed by canonical loading and OpenSn belong in mgxs.h5."""
+    text = (prepare(one_case, tmp_path / "run") / "openmc/model.py").read_text()
+    mgxs_types = _literal_assignment(text, "MGXS_TYPES")
+
+    assert mgxs_types == [
+        "total",
+        "absorption",
+        "consistent scatter matrix",
+        "consistent nu-scatter matrix",
+        "fission",
+        "nu-fission",
+        "chi",
+    ]
+    assert 'library.scatter_format = "legendre"' in text
+    assert 'library.legendre_order = CONFIG["scattering_order"]' in text
+    assert "library.correction = None" in text
+
+    # Exact element checks avoid confusing the consistent names with the old
+    # unqualified scatter/nu-scatter MGXS variants.
+    assert not {
+        "capture",
+        "chi-prompt",
+        "reduced absorption",
+        "scatter matrix",
+        "nu-scatter matrix",
+        "multiplicity matrix",
+        "nu-fission matrix",
+    }.intersection(mgxs_types)
+
+
 def test_named_openmc_groups_remain_named_in_generated_model(tmp_path):
     """SHEM boundaries are derived from one native OpenMC groups object."""
     from openmc.mgxs import GROUP_STRUCTURES

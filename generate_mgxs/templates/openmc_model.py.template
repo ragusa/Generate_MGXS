@@ -41,14 +41,14 @@ RUN_DIRECTORY = Path(__file__).resolve().parents[1]
 OPENMC_DIRECTORY = RUN_DIRECTORY / "openmc"
 MGXS_TYPES = [
     "total",
+    # OpenSn reconstructs absorption from total and transfer, but retaining
+    # this canonical OpenMC field keeps the exported library independently useful.
     "absorption",
-    "capture",
-    "fission",
-    "nu-fission",
     "consistent scatter matrix",
     "consistent nu-scatter matrix",
+    "fission",
+    "nu-fission",
     "chi",
-    "chi-prompt",
 ]
 
 CONFIG = {
@@ -241,9 +241,12 @@ def build_model():
     ]
     library.mgxs_types = MGXS_TYPES
     library.by_nuclide = False
-    # The direct and OpenSn equations use the physical total, not P0-corrected transport.
-    library.correction = None
+    # Export Legendre moments explicitly. OpenMC combines the consistent
+    # scatter pair into the scatter and multiplicity matrices read by OpenSn.
+    library.scatter_format = "legendre"
     library.legendre_order = CONFIG["scattering_order"]
+    # The direct and OpenSn equations use physical total, not P0-corrected transport.
+    library.correction = None
     library.check_library_for_openmc_mgxs()
     library.build_library()
 

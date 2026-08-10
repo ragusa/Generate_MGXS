@@ -22,6 +22,32 @@ def test_load_be9_hdf5_contract():
     assert xs.fission is xs.nu_fission is xs.chi is None
 
 
+def test_factorized_fission_hdf5_contract_needs_no_production_matrix(tmp_path):
+    """Fission production is represented by nu-fission and chi, not a matrix."""
+    path = tmp_path / "fissionable.h5"
+    write_tiny_mgxs(path)
+    with h5py.File(path, "r+") as h5:
+        domain = h5["one"]
+        domain.attrs["fissionable"] = True
+        temperature = domain["294K"]
+        temperature.create_dataset("fission", data=[0.2, 0.1])
+        temperature.create_dataset("nu-fission", data=[0.5, 0.25])
+        temperature.create_dataset("chi", data=[0.6, 0.2])
+
+    xs = load_mgxs(path, "one", 294.0)
+
+    # OpenMC HDF5 is high-to-low, while package arrays are ascending energy.
+    np.testing.assert_array_equal(xs.fission, [0.1, 0.2])
+    np.testing.assert_array_equal(xs.nu_fission, [0.25, 0.5])
+    np.testing.assert_array_equal(xs.chi, [0.25, 0.75])
+    np.testing.assert_array_equal(
+        xs.nu_fission[:, np.newaxis] * xs.chi[np.newaxis, :],
+        [[0.0625, 0.1875], [0.125, 0.375]],
+    )
+    with h5py.File(path, "r") as h5:
+        assert "nu-fission matrix" not in h5["one/294K"]
+
+
 def test_be9_scatter_orientation_reproduces_direct_oracle():
     """Reversing either scatter axis incorrectly would destroy this reference solve."""
     xs = load_mgxs(BE9_HDF5, "be9", 294.0)
