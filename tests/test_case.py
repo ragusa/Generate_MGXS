@@ -385,7 +385,7 @@ def test_hdpe_example_retains_the_benchmark_definition():
         "hdpe",
         "HDPE",
         0.955,
-        (("H1", 0.667), ("C", 0.333)),
+        (("H1", 2.0), ("C", 1.0)),
         ("c_H_in_CH2",),
         294.0,
     )
