@@ -23,7 +23,7 @@ run_openmc(
 )
 
 
-# --- OpenMC statepoint/MGXS processing -----------------------------------
+# --- OpenMC statepoint processing and result loading ----------------------
 run_openmc(
     run_path,
     cross_sections=os.environ["OPENMC_CROSS_SECTIONS"],
@@ -33,16 +33,18 @@ openmc_result = load_openmc_result(run_path)
 target_xs = load_mgxs(run_path / "openmc/mgxs.h5", "uo2_target", 294.0)
 moderator_xs = load_mgxs(run_path / "openmc/mgxs.h5", "hdpe_moderator", 294.0)
 
+# --- Per-domain MGXS plotting --------------------------------------------
 # The UO2 domain additionally produces chi and the derived fission-production
 # matrix. Domain-based filenames let both materials share one output directory.
 plot_mgxs(target_xs, output_directory=run_path / "plots")
 plot_mgxs(moderator_xs, output_directory=run_path / "plots")
 
 
-# --- Independent OpenSn domain verification and result summary ------------
+# --- Independent OpenSn domain verification ------------------------------
 # UO2 and HDPE are each solved alone in the same fixed reflected 8-cell cube;
 # the verifier does not reconstruct or couple the OpenMC target/moderator mesh.
 opensn = run_opensn(run_path, executable=os.environ["OPENSN_CONSOLE"])
 
+# --- Result summary -------------------------------------------------------
 print(openmc_result.values.sum(), target_xs.logical_domain, moderator_xs.logical_domain)
 print({name: spectrum.values.sum() for name, spectrum in opensn.domain_spectra.items()})
