@@ -310,6 +310,13 @@ def _filename_stem(logical_domain: str) -> str:
     return stem.lower() or "mgxs"
 
 
+def _positive_magnitudes(values):
+    """Replace nonpositive plotting values with NaN in an independent copy."""
+    plotted = np.array(values, dtype=float, copy=True)
+    plotted[plotted <= 0.0] = np.nan
+    return plotted
+
+
 def _plot_group_matrix(
     values_gin_gout,
     *,
@@ -444,7 +451,9 @@ def plot_mgxs(
             )
         )
     for label, values in vectors:
-        values_plot = np.insert(values, 0, values[0])
+        values_plot = _positive_magnitudes(
+            np.insert(values, 0, values[0])
+        )
         axis.semilogx(
             plotting_bounds,
             values_plot,
@@ -453,6 +462,7 @@ def plot_mgxs(
             label=label,
         )
     axis.set_xscale("log")
+    axis.set_yscale("log")
     axis.set_xlabel("Energy [eV]")
     axis.set_ylabel("Cross section [cm^-1]")
     axis.set_title(f"{mgxs.logical_domain} MGXS cross sections")
@@ -464,7 +474,13 @@ def plot_mgxs(
         # Solver-ready chi is dimensionless, so it must not share the reaction
         # cross-section axis above.
         figure, axis = plt.subplots()
-        axis.stairs(mgxs.chi, plotting_bounds)
+        chi_plot = np.append(mgxs.chi, mgxs.chi[-1])
+        axis.plot(
+            plotting_bounds,
+            chi_plot,
+            drawstyle="steps-post",
+            linewidth=1,
+        )
         axis.set_xscale("log")
         axis.set_xlabel("Energy [eV]")
         axis.set_ylabel("Chi")

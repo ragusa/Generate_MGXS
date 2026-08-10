@@ -486,7 +486,7 @@ def test_nonfissionable_plot_uses_energy_edges_and_requested_scatter_orientation
         assert line.get_drawstyle() == "steps"
         assert line.get_linewidth() == pytest.approx(1.0)
     assert vector_axis.get_xscale() == "log"
-    assert vector_axis.get_yscale() == "linear"
+    assert vector_axis.get_yscale() == "log"
 
     matrix_axis = figures["scatter_p1"].axes[0]
     mesh = matrix_axis.collections[0]
@@ -541,12 +541,69 @@ def test_fissionable_mgxs_vectors_use_explicit_step_line_data_without_mutation()
         assert line.get_linewidth() == pytest.approx(1.0)
 
     assert axis.get_xscale() == "log"
-    assert axis.get_yscale() == "linear"
+    assert axis.get_yscale() == "log"
     np.testing.assert_array_equal(mgxs.energy_bounds_ev, original_bounds)
     np.testing.assert_array_equal(mgxs.total, expected["Total"])
     np.testing.assert_array_equal(mgxs.absorption, expected["Absorption"])
     np.testing.assert_array_equal(mgxs.fission, expected["Fission"])
     np.testing.assert_array_equal(mgxs.nu_fission, expected["Nu-fission"])
+
+    plt.close("all")
+
+
+def test_cross_section_log_y_masks_zeros_without_mutation():
+    mgxs = synthetic_mgxs(fissionable=True)
+    mgxs.total[0] = 0.0
+    mgxs.absorption[1] = 0.0
+    mgxs.fission[0] = 0.0
+    mgxs.nu_fission[1] = 0.0
+    mgxs.chi[1] = 0.0
+    original = {
+        name: getattr(mgxs, name).copy()
+        for name in ("total", "absorption", "fission", "nu_fission", "chi")
+    }
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        figures = plot_mgxs(mgxs)
+
+    cross_sections = figures["cross_sections"].axes[0]
+    assert cross_sections.get_xscale() == cross_sections.get_yscale() == "log"
+    for label, name in (
+        ("Total", "total"),
+        ("Absorption", "absorption"),
+        ("Fission", "fission"),
+        ("Nu-fission", "nu_fission"),
+    ):
+        plotted = labelled_line(cross_sections, label).get_ydata()
+        expected = np.insert(original[name], 0, original[name][0])
+        positive = expected > 0.0
+        np.testing.assert_array_equal(
+            plotted[positive],
+            expected[positive],
+        )
+        assert np.all(np.isnan(plotted[~positive]))
+
+    chi_axis = figures["chi"].axes[0]
+    assert chi_axis.get_xscale() == "log"
+    assert chi_axis.get_yscale() == "linear"
+    assert len(chi_axis.patches) == 0
+    chi_line = chi_axis.lines[0]
+    np.testing.assert_array_equal(chi_line.get_xdata(), mgxs.energy_bounds_ev)
+    np.testing.assert_array_equal(
+        chi_line.get_ydata(),
+        np.append(original["chi"], original["chi"][-1]),
+    )
+    assert chi_line.get_drawstyle() == "steps-post"
+    assert not any(
+        issubclass(item.category, RuntimeWarning)
+        or "non-positive" in str(item.message).lower()
+        or "no positive" in str(item.message).lower()
+        for item in caught
+    )
+
+    for name, values in original.items():
+        np.testing.assert_array_equal(getattr(mgxs, name), values)
 
     plt.close("all")
 
@@ -629,8 +686,12 @@ def test_fissionable_plot_returns_and_saves_all_applicable_figures(tmp_path):
     assert displayed[0, 0] == expected[-1, -1]
     assert displayed[-1, -1] == expected[0, 0]
     matrix_axis = figures["fission_matrix"].axes[0]
+    chi_axis = figures["chi"].axes[0]
+    assert chi_axis.get_xscale() == "log"
+    assert chi_axis.get_yscale() == "linear"
     assert matrix_axis.get_xlim() == pytest.approx((0.5, 2.5))
     assert matrix_axis.get_ylim() == pytest.approx((2.5, 0.5))
+    assert matrix_axis.get_xscale() == matrix_axis.get_yscale() == "linear"
     np.testing.assert_array_equal(mgxs.nu_fission, nu_fission)
     np.testing.assert_array_equal(mgxs.chi, chi)
 
