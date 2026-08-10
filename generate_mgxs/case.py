@@ -224,8 +224,146 @@ class Material:
         self.role = role
 
 
+class ConcentricCell:
+    """One explicitly named cell/MGXS domain in a concentric geometry."""
+
+    def __init__(
+        self,
+        name: str,
+        material: Material,
+        xsdata_name: str,
+        outer_radius_cm: float | None = None,
+    ):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("cell name cannot be empty")
+        if not isinstance(material, Material):
+            raise ValueError("cell material must be a Material")
+        if not isinstance(xsdata_name, str) or not xsdata_name.strip():
+            raise ValueError("cell logical XS name cannot be empty")
+
+        self.name = name
+        self.material = material
+        self.xsdata_name = xsdata_name
+        self.outer_radius_cm = (
+            None
+            if outer_radius_cm is None
+            else _positive_float(outer_radius_cm, "cell outer radius")
+        )
+
+
+class ConcentricGeometry:
+    """Finite z-aligned cylindrical cells with an optional surrounding prism."""
+
+    def __init__(
+        self,
+        *,
+        regions,
+        height_cm,
+        axial_boundaries=("reflective", "reflective"),
+        outer_radial_boundary: Literal["reflective", "vacuum"] | None = None,
+        outer_region: ConcentricCell | None = None,
+        outer_half_widths_cm=None,
+        outer_xy_boundaries=None,
+    ):
+        try:
+            regions = tuple(regions)
+        except TypeError as error:
+            raise ValueError(
+                "concentric regions must contain ConcentricCell records"
+            ) from error
+        if not regions or not all(
+            isinstance(region, ConcentricCell) for region in regions
+        ):
+            raise ValueError("concentric regions must contain ConcentricCell records")
+        if any(region.outer_radius_cm is None for region in regions):
+            raise ValueError("each concentric radial region requires an outer radius")
+
+        radii = tuple(region.outer_radius_cm for region in regions)
+        if any(outer <= inner for inner, outer in zip(radii, radii[1:])):
+            raise ValueError("concentric radii must be strictly increasing")
+
+        try:
+            axial_boundaries = tuple(axial_boundaries)
+        except TypeError as error:
+            raise ValueError(
+                "two reflective/vacuum axial boundaries are required"
+            ) from error
+        if len(axial_boundaries) != 2 or any(
+            boundary not in {"reflective", "vacuum"}
+            for boundary in axial_boundaries
+        ):
+            raise ValueError("two reflective/vacuum axial boundaries are required")
+
+        if outer_region is None:
+            if outer_half_widths_cm is not None or outer_xy_boundaries is not None:
+                raise ValueError(
+                    "outer region, half-widths, and x-y boundaries must be supplied together"
+                )
+            if outer_radial_boundary not in {"reflective", "vacuum"}:
+                raise ValueError(
+                    "a geometry without an outer prism requires an outer radial boundary"
+                )
+            half_widths = None
+            xy_boundaries = None
+        else:
+            if not isinstance(outer_region, ConcentricCell):
+                raise ValueError("outer region must be a ConcentricCell")
+            if outer_region.outer_radius_cm is not None:
+                raise ValueError("the rectangular outer region cannot have a radius")
+            if outer_half_widths_cm is None or outer_xy_boundaries is None:
+                raise ValueError(
+                    "outer region, half-widths, and x-y boundaries must be supplied together"
+                )
+            if outer_radial_boundary is not None:
+                raise ValueError("the cylinder adjoining an outer prism is not a boundary")
+            try:
+                half_widths = tuple(float(value) for value in outer_half_widths_cm)
+            except (TypeError, ValueError) as error:
+                raise ValueError("outer half-widths must contain two finite values") from error
+            if len(half_widths) != 2 or any(
+                not math.isfinite(value) or value <= radii[-1]
+                for value in half_widths
+            ):
+                raise ValueError(
+                    "each outer half-width must be larger than the largest cylinder radius"
+                )
+            try:
+                xy_boundaries = tuple(outer_xy_boundaries)
+            except TypeError as error:
+                raise ValueError(
+                    "four reflective/vacuum outer x-y boundaries are required"
+                ) from error
+            if len(xy_boundaries) != 4 or any(
+                boundary not in {"reflective", "vacuum"}
+                for boundary in xy_boundaries
+            ):
+                raise ValueError("four reflective/vacuum outer x-y boundaries are required")
+
+        domains = regions + ((outer_region,) if outer_region is not None else ())
+        cell_names = [domain.name for domain in domains]
+        if len(set(cell_names)) != len(cell_names):
+            raise ValueError("concentric cell names must be unique")
+        xsdata_names = [domain.xsdata_name for domain in domains]
+        if len(set(xsdata_names)) != len(xsdata_names):
+            raise ValueError("concentric geometry has duplicate logical XS names")
+
+        self.regions = regions
+        self.height_cm = _positive_float(height_cm, "concentric axial height")
+        self.axial_boundaries = axial_boundaries
+        self.outer_radial_boundary = outer_radial_boundary
+        self.outer_region = outer_region
+        self.outer_half_widths_cm = half_widths
+        self.outer_xy_boundaries = xy_boundaries
+
+    @property
+    def domains(self) -> tuple[ConcentricCell, ...]:
+        return self.regions + (
+            (self.outer_region,) if self.outer_region is not None else ()
+        )
+
+
 class Case:
-    """One independently preparable fixed-source or homogeneous eigenvalue case."""
+    """One independently preparable fixed-source or eigenvalue case."""
 
     def __init__(
         self,
@@ -233,12 +371,15 @@ class Case:
         name: str,
         materials,
         energy_groups,
-        target_dimensions_cm,
+        target_dimensions_cm=None,
         source_kind: Literal["uniform_energy", "watt", "grouped"] | None = None,
         run_mode: Literal["fixed_source", "eigenvalue"] = "fixed_source",
         source_probabilities=None,
         outer_dimensions_cm=None,
         boundaries=("reflective",) * 6,
+        geometry: ConcentricGeometry | None = None,
+        source_bounds_cm=None,
+        source_energy_bounds_ev=None,
         particles_per_batch: int = 25_000,
         batches: int = 40,
         inactive_batches: int = 0,
@@ -256,20 +397,31 @@ class Case:
         materials = tuple(materials)
         if (
             not materials
-            or len(materials) > 2
             or not all(isinstance(material, Material) for material in materials)
         ):
-            raise ValueError("a case requires one material or a target and moderator")
+            raise ValueError("a case requires at least one Material")
 
         logical_names = [material.logical_name for material in materials]
         if len(set(logical_names)) != len(logical_names):
             raise ValueError("logical material names must be unique")
 
-        roles = {material.role for material in materials}
-        if len(materials) == 1 and roles != {"homogeneous"}:
-            raise ValueError("one material must have the homogeneous role")
-        if len(materials) == 2 and roles != {"target", "moderator"}:
-            raise ValueError("two materials must have target and moderator roles")
+        if geometry is not None and not isinstance(geometry, ConcentricGeometry):
+            raise ValueError("geometry must be a ConcentricGeometry")
+        if geometry is None:
+            roles = {material.role for material in materials}
+            if len(materials) == 1 and roles != {"homogeneous"}:
+                raise ValueError("one material must have the homogeneous role")
+            if len(materials) == 2 and roles != {"target", "moderator"}:
+                raise ValueError("two materials must have target and moderator roles")
+            if len(materials) > 2:
+                raise ValueError("box geometry supports one material or a target and moderator")
+        else:
+            declared = tuple(materials)
+            used = tuple(dict.fromkeys(domain.material for domain in geometry.domains))
+            if set(declared) != set(used) or len(declared) != len(set(declared)):
+                raise ValueError(
+                    "every declared material must be used by the geometry exactly once"
+                )
 
         if isinstance(energy_groups, str):
             energy_group_structure = energy_groups
@@ -283,7 +435,7 @@ class Case:
 
         if run_mode not in {"fixed_source", "eigenvalue"}:
             raise ValueError("run_mode must be fixed_source or eigenvalue")
-        if run_mode == "eigenvalue" and len(materials) != 1:
+        if run_mode == "eigenvalue" and geometry is None and len(materials) != 1:
             raise ValueError("eigenvalue cases require one homogeneous material")
         if run_mode == "fixed_source":
             if source_kind not in {"uniform_energy", "watt", "grouped"}:
@@ -321,20 +473,71 @@ class Case:
         elif source_probabilities is not None:
             raise ValueError("only a grouped source accepts source_probabilities")
 
-        target = self._dimensions(target_dimensions_cm, "target dimensions")
-        outer = None if outer_dimensions_cm is None else self._dimensions(
-            outer_dimensions_cm, "outer dimensions"
-        )
+        if source_energy_bounds_ev is None:
+            uniform_energy_bounds = None
+        else:
+            if run_mode != "fixed_source" or source_kind != "uniform_energy":
+                raise ValueError(
+                    "source_energy_bounds_ev is supported only for a uniform-energy source"
+                )
+            try:
+                uniform_energy_bounds = tuple(
+                    float(value) for value in source_energy_bounds_ev
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "source_energy_bounds_ev must contain two finite increasing values"
+                ) from error
+            if (
+                len(uniform_energy_bounds) != 2
+                or any(not math.isfinite(value) for value in uniform_energy_bounds)
+                or uniform_energy_bounds[0] < 0.0
+                or uniform_energy_bounds[0] >= uniform_energy_bounds[1]
+            ):
+                raise ValueError(
+                    "source_energy_bounds_ev must contain two finite increasing nonnegative values"
+                )
 
-        if len(materials) == 2:
-            if outer is None or any(outside <= inside for inside, outside in zip(target, outer)):
-                raise ValueError("moderated outer dimensions must strictly exceed target dimensions")
-        elif outer is not None and outer != target:
-            raise ValueError("a homogeneous case does not have distinct outer dimensions")
+        if geometry is None:
+            target = self._dimensions(target_dimensions_cm, "target dimensions")
+            outer = None if outer_dimensions_cm is None else self._dimensions(
+                outer_dimensions_cm, "outer dimensions"
+            )
+
+            if len(materials) == 2:
+                if outer is None or any(outside <= inside for inside, outside in zip(target, outer)):
+                    raise ValueError("moderated outer dimensions must strictly exceed target dimensions")
+            elif outer is not None and outer != target:
+                raise ValueError("a homogeneous case does not have distinct outer dimensions")
+        else:
+            if target_dimensions_cm is not None or outer_dimensions_cm is not None:
+                raise ValueError("concentric geometry does not use box target/outer dimensions")
+            target = None
+            outer = None
 
         boundaries = tuple(boundaries)
         if len(boundaries) != 6 or any(x not in {"reflective", "vacuum"} for x in boundaries):
             raise ValueError("six reflective/vacuum boundary values are required")
+
+        if source_bounds_cm is None:
+            if target is None:
+                raise ValueError("concentric geometry requires explicit source_bounds_cm")
+            source_bounds = tuple(-value / 2.0 for value in target) + tuple(
+                value / 2.0 for value in target
+            )
+        else:
+            try:
+                source_bounds = tuple(float(value) for value in source_bounds_cm)
+            except (TypeError, ValueError) as error:
+                raise ValueError("source_bounds_cm must contain six finite bounds") from error
+            if (
+                len(source_bounds) != 6
+                or any(not math.isfinite(value) for value in source_bounds)
+                or any(low >= high for low, high in zip(source_bounds[:3], source_bounds[3:]))
+            ):
+                raise ValueError(
+                    "source_bounds_cm must contain three lower bounds below three upper bounds"
+                )
 
         self.name = name
         self.materials = materials
@@ -346,6 +549,9 @@ class Case:
         self.target_dimensions_cm = target
         self.outer_dimensions_cm = outer
         self.boundaries = boundaries
+        self.geometry = geometry
+        self.source_bounds_cm = source_bounds
+        self.source_energy_bounds_ev = uniform_energy_bounds
         self.particles_per_batch = _integer(
             particles_per_batch, "particles_per_batch", minimum=1
         )
@@ -409,7 +615,10 @@ class Case:
         if self.run_mode != "fixed_source":
             return None
         if self.source_kind == "uniform_energy":
-            return {"kind": "uniform_energy"}
+            definition = {"kind": "uniform_energy"}
+            if self.source_energy_bounds_ev is not None:
+                definition["energy_bounds_ev"] = self.source_energy_bounds_ev
+            return definition
         if self.source_kind == "watt":
             return {
                 "kind": "watt",
@@ -420,12 +629,19 @@ class Case:
 
     @property
     def source_volume_cm3(self) -> float:
-        """Return the target volume over which the unit source is distributed."""
-        return math.prod(self.target_dimensions_cm)
+        """Return the spatial box volume over which the unit source is distributed."""
+        return math.prod(
+            high - low
+            for low, high in zip(
+                self.source_bounds_cm[:3], self.source_bounds_cm[3:]
+            )
+        )
 
     @property
     def geometry_type(self) -> str:
         """Return the generated geometry implementation selected by material roles."""
+        if self.geometry is not None:
+            return "concentric"
         return "homogeneous" if len(self.materials) == 1 else "moderated_target"
 
     @property
@@ -468,6 +684,91 @@ def _material_records(case: Case) -> list[dict]:
     ]
 
 
+def _mgxs_domain_records(case: Case) -> list[dict]:
+    """Serialize the declared domain order independently of OpenMC IDs/order."""
+    if case.geometry is not None:
+        return [
+            {
+                "domain_type": "cell",
+                "cell_name": domain.name,
+                "material_logical_name": domain.material.logical_name,
+                "xsdata_name": domain.xsdata_name,
+                "temperature_k": domain.material.temperature_k,
+                "primary": index == 0,
+            }
+            for index, domain in enumerate(case.geometry.domains)
+        ]
+
+    return [
+        {
+            "domain_type": "material",
+            "cell_name": None,
+            "material_logical_name": material.logical_name,
+            "xsdata_name": material.logical_name,
+            "temperature_k": material.temperature_k,
+            "primary": material.role in {"homogeneous", "target"},
+        }
+        for material in case.materials
+    ]
+
+
+def _geometry_record(case: Case) -> dict:
+    if case.geometry is None:
+        return {
+            "type": case.geometry_type,
+            "target_dimensions_cm": case.target_dimensions_cm,
+            "outer_dimensions_cm": (
+                case.outer_dimensions_cm or case.target_dimensions_cm
+            ),
+            "boundaries": dict(
+                zip(
+                    ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"),
+                    case.boundaries,
+                )
+            ),
+        }
+
+    geometry = case.geometry
+    return {
+        "type": "concentric",
+        "regions": tuple(
+            {
+                "cell_name": region.name,
+                "material_logical_name": region.material.logical_name,
+                "xsdata_name": region.xsdata_name,
+                "outer_radius_cm": region.outer_radius_cm,
+            }
+            for region in geometry.regions
+        ),
+        "height_cm": geometry.height_cm,
+        "axial_boundaries": {
+            "zmin": geometry.axial_boundaries[0],
+            "zmax": geometry.axial_boundaries[1],
+        },
+        "outer_radial_boundary": geometry.outer_radial_boundary,
+        "outer_region": (
+            None
+            if geometry.outer_region is None
+            else {
+                "cell_name": geometry.outer_region.name,
+                "material_logical_name": geometry.outer_region.material.logical_name,
+                "xsdata_name": geometry.outer_region.xsdata_name,
+            }
+        ),
+        "outer_half_widths_cm": geometry.outer_half_widths_cm,
+        "outer_xy_boundaries": (
+            None
+            if geometry.outer_xy_boundaries is None
+            else dict(
+                zip(
+                    ("xmin", "xmax", "ymin", "ymax"),
+                    geometry.outer_xy_boundaries,
+                )
+            )
+        ),
+    }
+
+
 def _jsonable_case(case: Case) -> dict:
     record = {
         "name": case.name,
@@ -478,6 +779,10 @@ def _jsonable_case(case: Case) -> dict:
         "target_dimensions_cm": case.target_dimensions_cm,
         "outer_dimensions_cm": case.outer_dimensions_cm,
         "boundaries": case.boundaries,
+        "geometry": _geometry_record(case),
+        "mgxs_domains": _mgxs_domain_records(case),
+        "source_bounds_cm": case.source_bounds_cm,
+        "source_energy_bounds_ev": case.source_energy_bounds_ev,
         "particles_per_batch": case.particles_per_batch,
         "batches": case.batches,
         "inactive_batches": case.inactive_batches,
@@ -548,6 +853,8 @@ def prepare(
         raise ValueError(f"unknown solver {sorted(unknown)[0]!r}")
     if "opensn" in requested and "openmc" not in requested:
         raise ValueError("OpenSn preparation requires OpenMC")
+    if "opensn" in requested and case.geometry_type == "concentric":
+        raise ValueError("OpenSn does not support managed concentric geometry")
 
     # Store and generate in dependency order even when the caller supplies an
     # unordered iterable such as a set.

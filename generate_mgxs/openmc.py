@@ -14,22 +14,22 @@ import sys
 
 import numpy as np
 
-from .case import Case, _artifact, _material_records, _update_run_metadata
+from .case import (
+    Case,
+    _artifact,
+    _geometry_record,
+    _material_records,
+    _mgxs_domain_records,
+    _update_run_metadata,
+)
 from .results import OpenMCEigenvalueResult, Spectrum
 
 
 def _write_openmc_input(case: Case, path: Path) -> None:
     """Render one deterministic, independently runnable OpenMC program."""
     materials = _material_records(case)
-
-    geometry = {
-        "type": case.geometry_type,
-        "target_dimensions_cm": case.target_dimensions_cm,
-        "outer_dimensions_cm": case.outer_dimensions_cm or case.target_dimensions_cm,
-        "boundaries": dict(
-            zip(("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"), case.boundaries)
-        ),
-    }
+    geometry = _geometry_record(case)
+    mgxs_domains = _mgxs_domain_records(case)
 
     history = {
         "run_mode": case.run_mode,
@@ -69,13 +69,21 @@ def _write_openmc_input(case: Case, path: Path) -> None:
     replacements = {
         "__CASE_NAME__": repr(case.name),
         "__MATERIALS__": pprint.pformat(materials, width=100, sort_dicts=False),
+        "__MGXS_DOMAINS__": pprint.pformat(
+            mgxs_domains, width=100, sort_dicts=False
+        ),
         "__GEOMETRY__": pprint.pformat(geometry, width=100, sort_dicts=False),
         "__PHYSICAL_SOURCE__": pprint.pformat(
             case.source_definition, width=100, sort_dicts=False
         ),
         "__HISTORY__": pprint.pformat(history, width=100, sort_dicts=False),
         "__MGXS_SETTINGS__": pprint.pformat(
-            {"scattering_order": case.scattering_order}, width=100, sort_dicts=False
+            {"scattering_order": case.scattering_order},
+            width=100,
+            sort_dicts=False,
+        ),
+        "__SOURCE_BOUNDS__": pprint.pformat(
+            case.source_bounds_cm, width=100, sort_dicts=False
         ),
         "__ENERGY_GROUP_DEFINITION__": energy_group_definition,
     }

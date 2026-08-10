@@ -261,7 +261,12 @@ def test_case_exposes_only_genuine_opensn_convergence_controls():
     import inspect
 
     parameters = inspect.signature(Case).parameters
-    for removed in ("mesh_max_width_cm", "num_polar", "num_azimuthal"):
+    for removed in (
+        "mesh_max_width_cm",
+        "num_polar",
+        "num_azimuthal",
+        "tally_trigger_std_dev",
+    ):
         assert removed not in parameters
     # This still governs the moments generated and retained by OpenMC MGXS.
     assert "scattering_order" in parameters

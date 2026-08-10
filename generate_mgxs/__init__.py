@@ -1,6 +1,14 @@
 """Public API for transparent OpenMC/OpenSn multigroup calculations."""
 
-from .case import Case, Material, energy_bounds, prepare, source_probabilities
+from .case import (
+    Case,
+    ConcentricCell,
+    ConcentricGeometry,
+    Material,
+    energy_bounds,
+    prepare,
+    source_probabilities,
+)
 from .direct import solve_infinite_medium, solve_infinite_medium_eigenvalue
 from .mgxs import MGXS, load_mgxs
 from .openmc import load_openmc_result, run_openmc
@@ -18,6 +26,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Case",
+    "ConcentricCell",
+    "ConcentricGeometry",
     "EigenvalueSolution",
     "InfiniteMediumSolution",
     "MGXS",

@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 
 import numpy as np
 import openmc
@@ -18,6 +19,10 @@ import openmc.mgxs
 CASE_NAME = __CASE_NAME__
 MATERIALS = __MATERIALS__
 
+# This ordered declaration, not OpenMC object/dictionary ordering, is the
+# authority for MGXS domains and their exported XSdata names.
+MGXS_DOMAINS = __MGXS_DOMAINS__
+
 # Geometry dimensions are full lengths in cm.  Material roles, rather than
 # caller ordering, determine target and moderator regions.
 GEOMETRY = __GEOMETRY__
@@ -25,6 +30,7 @@ GEOMETRY = __GEOMETRY__
 # Fixed-source cases use one physical authority for continuous OpenMC sampling
 # and derived OpenSn group probabilities. Eigenvalue cases store None here.
 PHYSICAL_SOURCE = __PHYSICAL_SOURCE__
+SOURCE_BOUNDS_CM = __SOURCE_BOUNDS__
 
 # OpenMC interprets particles as particles per batch, not total histories.
 OPENMC_HISTORY_SETTINGS = __HISTORY__
@@ -56,9 +62,7 @@ CONFIG = {
     "run_mode": OPENMC_HISTORY_SETTINGS["run_mode"],
     "materials": MATERIALS,
     "geometry_type": GEOMETRY["type"],
-    "target_dimensions_cm": GEOMETRY["target_dimensions_cm"],
-    "outer_dimensions_cm": GEOMETRY["outer_dimensions_cm"],
-    "boundaries": GEOMETRY["boundaries"],
+    "source_bounds_cm": SOURCE_BOUNDS_CM,
     "batches": OPENMC_HISTORY_SETTINGS["batches"],
     "inactive_batches": OPENMC_HISTORY_SETTINGS["inactive_batches"],
     "particles_per_batch": OPENMC_HISTORY_SETTINGS["particles_per_batch"],
@@ -150,38 +154,41 @@ def build_model():
         model.materials.cross_sections = os.environ["OPENMC_CROSS_SECTIONS"]
 
     # --- Geometry ----------------------------------------------------------
-    target = next(
-        item
-        for item in CONFIG["materials"]
-        if item["role"] in ("homogeneous", "target")
-    )
-    target_material = material_by_domain[target["logical_name"]]
-    tdx, tdy, tdz = CONFIG["target_dimensions_cm"]
+    cell_by_name = {}
+
+    if CONFIG["geometry_type"] in {"homogeneous", "moderated_target"}:
+        target = next(
+            item
+            for item in CONFIG["materials"]
+            if item["role"] in ("homogeneous", "target")
+        )
+        target_material = material_by_domain[target["logical_name"]]
+        tdx, tdy, tdz = GEOMETRY["target_dimensions_cm"]
 
     if CONFIG["geometry_type"] == "homogeneous":
         surfaces = (
-            openmc.XPlane(x0=-tdx / 2, boundary_type=CONFIG["boundaries"]["xmin"]),
-            openmc.XPlane(x0=+tdx / 2, boundary_type=CONFIG["boundaries"]["xmax"]),
-            openmc.YPlane(y0=-tdy / 2, boundary_type=CONFIG["boundaries"]["ymin"]),
-            openmc.YPlane(y0=+tdy / 2, boundary_type=CONFIG["boundaries"]["ymax"]),
-            openmc.ZPlane(z0=-tdz / 2, boundary_type=CONFIG["boundaries"]["zmin"]),
-            openmc.ZPlane(z0=+tdz / 2, boundary_type=CONFIG["boundaries"]["zmax"]),
+            openmc.XPlane(x0=-tdx / 2, boundary_type=GEOMETRY["boundaries"]["xmin"]),
+            openmc.XPlane(x0=+tdx / 2, boundary_type=GEOMETRY["boundaries"]["xmax"]),
+            openmc.YPlane(y0=-tdy / 2, boundary_type=GEOMETRY["boundaries"]["ymin"]),
+            openmc.YPlane(y0=+tdy / 2, boundary_type=GEOMETRY["boundaries"]["ymax"]),
+            openmc.ZPlane(z0=-tdz / 2, boundary_type=GEOMETRY["boundaries"]["zmin"]),
+            openmc.ZPlane(z0=+tdz / 2, boundary_type=GEOMETRY["boundaries"]["zmax"]),
         )
         xmin, xmax, ymin, ymax, zmin, zmax = surfaces
         target_region = +xmin & -xmax & +ymin & -ymax & +zmin & -zmax
         cells = [openmc.Cell(fill=target_material, region=target_region)]
-    else:
+    elif CONFIG["geometry_type"] == "moderated_target":
         tx0, tx1 = openmc.XPlane(-tdx / 2), openmc.XPlane(+tdx / 2)
         ty0, ty1 = openmc.YPlane(-tdy / 2), openmc.YPlane(+tdy / 2)
         tz0, tz1 = openmc.ZPlane(-tdz / 2), openmc.ZPlane(+tdz / 2)
         target_region = +tx0 & -tx1 & +ty0 & -ty1 & +tz0 & -tz1
-        odx, ody, odz = CONFIG["outer_dimensions_cm"]
-        ox0 = openmc.XPlane(-odx / 2, boundary_type=CONFIG["boundaries"]["xmin"])
-        ox1 = openmc.XPlane(+odx / 2, boundary_type=CONFIG["boundaries"]["xmax"])
-        oy0 = openmc.YPlane(-ody / 2, boundary_type=CONFIG["boundaries"]["ymin"])
-        oy1 = openmc.YPlane(+ody / 2, boundary_type=CONFIG["boundaries"]["ymax"])
-        oz0 = openmc.ZPlane(-odz / 2, boundary_type=CONFIG["boundaries"]["zmin"])
-        oz1 = openmc.ZPlane(+odz / 2, boundary_type=CONFIG["boundaries"]["zmax"])
+        odx, ody, odz = GEOMETRY["outer_dimensions_cm"]
+        ox0 = openmc.XPlane(-odx / 2, boundary_type=GEOMETRY["boundaries"]["xmin"])
+        ox1 = openmc.XPlane(+odx / 2, boundary_type=GEOMETRY["boundaries"]["xmax"])
+        oy0 = openmc.YPlane(-ody / 2, boundary_type=GEOMETRY["boundaries"]["ymin"])
+        oy1 = openmc.YPlane(+ody / 2, boundary_type=GEOMETRY["boundaries"]["ymax"])
+        oz0 = openmc.ZPlane(-odz / 2, boundary_type=GEOMETRY["boundaries"]["zmin"])
+        oz1 = openmc.ZPlane(+odz / 2, boundary_type=GEOMETRY["boundaries"]["zmax"])
         outer_region = +ox0 & -ox1 & +oy0 & -oy1 & +oz0 & -oz1
         moderator = next(
             item for item in CONFIG["materials"] if item["role"] == "moderator"
@@ -193,6 +200,54 @@ def build_model():
                 region=outer_region & ~target_region,
             ),
         ]
+    else:
+        zmin = openmc.ZPlane(
+            z0=-GEOMETRY["height_cm"] / 2,
+            boundary_type=GEOMETRY["axial_boundaries"]["zmin"],
+        )
+        zmax = openmc.ZPlane(
+            z0=+GEOMETRY["height_cm"] / 2,
+            boundary_type=GEOMETRY["axial_boundaries"]["zmax"],
+        )
+        cylinders = []
+        for index, definition in enumerate(GEOMETRY["regions"]):
+            arguments = {"r": definition["outer_radius_cm"]}
+            if index == len(GEOMETRY["regions"]) - 1 and GEOMETRY["outer_region"] is None:
+                arguments["boundary_type"] = GEOMETRY["outer_radial_boundary"]
+            cylinders.append(openmc.ZCylinder(**arguments))
+
+        cells = []
+        for index, (definition, cylinder) in enumerate(
+            zip(GEOMETRY["regions"], cylinders)
+        ):
+            radial_region = -cylinder
+            if index:
+                radial_region = +cylinders[index - 1] & radial_region
+            region = radial_region & +zmin & -zmax
+            cell = openmc.Cell(
+                name=definition["cell_name"],
+                fill=material_by_domain[definition["material_logical_name"]],
+                region=region,
+            )
+            cells.append(cell)
+            cell_by_name[cell.name] = cell
+
+        if GEOMETRY["outer_region"] is not None:
+            hx, hy = GEOMETRY["outer_half_widths_cm"]
+            xy_boundaries = GEOMETRY["outer_xy_boundaries"]
+            xmin = openmc.XPlane(x0=-hx, boundary_type=xy_boundaries["xmin"])
+            xmax = openmc.XPlane(x0=+hx, boundary_type=xy_boundaries["xmax"])
+            ymin = openmc.YPlane(y0=-hy, boundary_type=xy_boundaries["ymin"])
+            ymax = openmc.YPlane(y0=+hy, boundary_type=xy_boundaries["ymax"])
+            outer_box = +xmin & -xmax & +ymin & -ymax & +zmin & -zmax
+            definition = GEOMETRY["outer_region"]
+            cell = openmc.Cell(
+                name=definition["cell_name"],
+                fill=material_by_domain[definition["material_logical_name"]],
+                region=outer_box & +cylinders[-1],
+            )
+            cells.append(cell)
+            cell_by_name[cell.name] = cell
 
     model.geometry = openmc.Geometry(cells)
 
@@ -204,6 +259,8 @@ def build_model():
     settings.batches = CONFIG["batches"]
     settings.particles = CONFIG["particles_per_batch"]
     settings.temperature = {"default": CONFIG["materials"][0]["temperature_k"]}
+    source_low = CONFIG["source_bounds_cm"][:3]
+    source_high = CONFIG["source_bounds_cm"][3:]
 
     if CONFIG["run_mode"] == "eigenvalue":
         settings.inactive = CONFIG["inactive_batches"]
@@ -212,8 +269,8 @@ def build_model():
         # determines its energy distribution through fission generations.
         source = openmc.IndependentSource(
             space=openmc.stats.Box(
-                (-tdx / 2, -tdy / 2, -tdz / 2),
-                (tdx / 2, tdy / 2, tdz / 2),
+                source_low,
+                source_high,
                 only_fissionable=True,
             )
         )
@@ -221,16 +278,19 @@ def build_model():
     else:
         source = openmc.IndependentSource()
         source.space = openmc.stats.Box(
-            (-tdx / 2, -tdy / 2, -tdz / 2),
-            (tdx / 2, tdy / 2, tdz / 2),
+            source_low,
+            source_high,
             only_fissionable=False,
         )
         source.angle = openmc.stats.Isotropic()
 
         # Continuous-energy sampling is built directly from PHYSICAL_SOURCE.
         if PHYSICAL_SOURCE["kind"] == "uniform_energy":
+            energy_bounds = PHYSICAL_SOURCE.get(
+                "energy_bounds_ev", (ENERGY_BOUNDS_EV[0], ENERGY_BOUNDS_EV[-1])
+            )
             source.energy = openmc.stats.Uniform(
-                ENERGY_BOUNDS_EV[0], ENERGY_BOUNDS_EV[-1]
+                energy_bounds[0], energy_bounds[1]
             )
         elif PHYSICAL_SOURCE["kind"] == "watt":
             source.energy = openmc.stats.Watt(
@@ -256,10 +316,14 @@ def build_model():
     # --- MGXS tallies ------------------------------------------------------
     library = openmc.mgxs.Library(model.geometry)
     library.energy_groups = groups
-    library.domain_type = "material"
-    library.domains = [
-        material_by_domain[item["logical_name"]] for item in CONFIG["materials"]
-    ]
+    library.domain_type = MGXS_DOMAINS[0]["domain_type"]
+    if library.domain_type == "cell":
+        library.domains = [cell_by_name[item["cell_name"]] for item in MGXS_DOMAINS]
+    else:
+        library.domains = [
+            material_by_domain[item["material_logical_name"]]
+            for item in MGXS_DOMAINS
+        ]
     library.mgxs_types = MGXS_TYPES
     library.by_nuclide = False
     # Export Legendre moments explicitly. OpenMC combines the consistent
@@ -308,11 +372,36 @@ def _canonical_xs(mgxs, quantity):
     ).reshape(-1)
 
 
+def create_mean_mg_library(library=MGXS_LIBRARY):
+    """Create the mean library in the managed domain order with declared names."""
+    names = [item["xsdata_name"] for item in MGXS_DOMAINS]
+    return library.create_mg_library(xsdata_names=names)
+
+
+def _select_statepoint(statepoint=None):
+    """Return an explicit statepoint or discover the greatest batch number."""
+    if statepoint is not None:
+        return Path(statepoint)
+
+    candidates = []
+    for path in OPENMC_DIRECTORY.glob("statepoint.*.h5"):
+        if not path.is_file():
+            continue
+        match = re.fullmatch(r"statepoint\.(\d+)\.h5", path.name)
+        if match is not None:
+            candidates.append((int(match.group(1)), path.name, path))
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"no valid OpenMC statepoint found in {OPENMC_DIRECTORY}"
+        )
+
+    return max(candidates)[2]
+
+
 def process_statepoint(statepoint=None):
     """Create mgxs.h5, uncertainty diagnostics, and the compact flux result."""
-    statepoint = Path(
-        statepoint or OPENMC_DIRECTORY / f"statepoint.{CONFIG['batches']}.h5"
-    )
+    statepoint = _select_statepoint(statepoint)
     if not statepoint.is_file():
         raise FileNotFoundError(f"expected OpenMC statepoint is missing: {statepoint}")
 
@@ -327,8 +416,7 @@ def process_statepoint(statepoint=None):
         MGXS_LIBRARY.load_from_statepoint(statepoint_file)
 
     # mgxs.h5 is the only cross-section handoff consumed by generated OpenSn.
-    names = [item["logical_name"] for item in CONFIG["materials"]]
-    mean_library = MGXS_LIBRARY.create_mg_library(xsdata_names=names)
+    mean_library = create_mean_mg_library()
     mean_library.export_to_hdf5(str(OPENMC_DIRECTORY / "mgxs.h5"))
 
     uncertainty = {
@@ -338,7 +426,7 @@ def process_statepoint(statepoint=None):
     }
     spectra = {}
 
-    for item, domain in zip(CONFIG["materials"], MGXS_LIBRARY.domains):
+    for item, domain in zip(MGXS_DOMAINS, MGXS_LIBRARY.domains):
         total = MGXS_LIBRARY.get_mgxs(domain, "total")
         flux = np.asarray(
             total.get_flux(order_groups="decreasing", value="mean"), dtype=float
@@ -347,7 +435,7 @@ def process_statepoint(statepoint=None):
             total.get_flux(order_groups="decreasing", value="std_dev"),
             dtype=float,
         ).reshape(-1)
-        spectra[item["logical_name"]] = {
+        spectra[item["xsdata_name"]] = {
             "flux": flux.tolist(),
             "std_dev": flux_std.tolist(),
         }
@@ -388,7 +476,7 @@ def process_statepoint(statepoint=None):
             normalized = raw * factor
             index = int(np.argmax(normalized))
             correction = float(1.0 - normalized.sum())
-            uncertainty["domains"].setdefault(item["logical_name"], {})["chi"] = {
+            uncertainty["domains"].setdefault(item["xsdata_name"], {})["chi"] = {
                 "raw_sum": raw_sum,
                 "normalization_factor": factor,
                 "closure_index": index,
@@ -396,7 +484,7 @@ def process_statepoint(statepoint=None):
                 "normalized_uncertainty": None,
             }
 
-        domain_record = uncertainty["domains"].setdefault(item["logical_name"], {})
+        domain_record = uncertainty["domains"].setdefault(item["xsdata_name"], {})
         domain_record["temperature_k"] = item["temperature_k"]
         domain_record["quantities"] = {
             name: {"std_dev": values.tolist()} for name, values in quantities.items()
@@ -410,11 +498,7 @@ def process_statepoint(statepoint=None):
 
     # The compact primary result reports the homogeneous or target domain;
     # per-domain spectra remain available for moderated calculations.
-    primary = next(
-        item["logical_name"]
-        for item in CONFIG["materials"]
-        if item["role"] in ("homogeneous", "target")
-    )
+    primary = next(item["xsdata_name"] for item in MGXS_DOMAINS if item["primary"])
     result = {
         "energy_bounds": ENERGY_BOUNDS_EV.tolist(),
         "flux": spectra[primary]["flux"],
