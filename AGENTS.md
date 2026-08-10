@@ -1,148 +1,192 @@
-Use the existing Ubuntu 22.04 WSL installation under Linux user `ragusa`. Do not use Windows Python, Windows OpenMC, or Windows-side path conversions.
+# Generate_MGXS agent instructions
 
-Repository:
-  /home/ragusa/repo/Generate_MGXS
+## Execution environment
 
-Work area:
-  /home/ragusa/work/Generate_MGXS/cases
+Use the existing Ubuntu 22.04 WSL installation as Linux user `ragusa`.
+Do not use Windows Python, Windows OpenMC, or Windows-side path conversions.
 
-OpenMC and OpenSn must run as separate processes with separate environments. Never import OpenMC and pyopensn in the same Python process.
+The main repository is:
 
-OPENMC
-======
+```text
+/home/ragusa/repo/Generate_MGXS
+```
 
-Use this exact interpreter:
-  /home/ragusa/miniforge3/envs/openmc-env/bin/python
+External case runs and their potentially large outputs live under:
 
-Required environment:
-  export OPENMC_CROSS_SECTIONS=/home/ragusa/xs/endfb-viii.0-hdf5/cross_sections.xml
-  export PYTHONPATH=/home/ragusa/repo/Generate_MGXS${PYTHONPATH:+:$PYTHONPATH}
-  export OMP_NUM_THREADS=40
-  export OPENSN_CONSOLE=/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console
-
-Do not modify or activate the Conda environment. Do not set MGXS_PROCESSES=1.
-
-To run a case:
-  cd /home/ragusa/work/Generate_MGXS/cases/<case>
-  /home/ragusa/miniforge3/envs/openmc-env/bin/python run.py
-
-For example, FlatTop:
-  cd /home/ragusa/work/Generate_MGXS/cases/flattop
-  export OPENMC_CROSS_SECTIONS=/home/ragusa/xs/endfb-viii.0-hdf5/cross_sections.xml
-  export PYTHONPATH=/home/ragusa/repo/Generate_MGXS${PYTHONPATH:+:$PYTHONPATH}
-  export OMP_NUM_THREADS=40
-  export OPENSN_CONSOLE=/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console
-  /home/ragusa/miniforge3/envs/openmc-env/bin/python run.py
+```text
+/home/ragusa/work/Generate_MGXS/cases
+```
 
 If the controlling shell starts on Windows, enter WSL with:
-  wsl -d Ubuntu-22.04 -- bash -lc '<Linux command>'
+
+```powershell
+wsl -d Ubuntu-22.04 -- bash -lc '<Linux command>'
+```
 
 Do not repeatedly try alternative Windows launch mechanisms.
 
-OpenMC monitoring:
-  tail -f run/logs/openmc_run.stdout
+## OpenMC environment
 
-  ps -eo pid,ppid,etime,nlwp,%cpu,%mem,cmd \
-    | grep -E '[o]penmc|[m]odel.py|[p]ython run.py'
+Use this exact interpreter without activating or modifying the Conda
+environment:
 
-  ps -o pid,nlwp,etime,%cpu,%mem,cmd -C openmc
+```text
+/home/ragusa/miniforge3/envs/openmc-env/bin/python
+```
 
-  ls -lh run/openmc/statepoint.*.h5
+Set this environment before running repository tests, examples, or OpenMC
+case runners:
 
-Important OpenMC logs:
-  run/logs/openmc_run.stdout
-  run/logs/openmc_run.stderr
-  run/logs/openmc_process.stdout
-  run/logs/openmc_process.stderr
+```bash
+export PYTHONPATH=/home/ragusa/repo/Generate_MGXS${PYTHONPATH:+:$PYTHONPATH}
+export OPENMC_CROSS_SECTIONS=/home/ragusa/xs/endfb-viii.0-hdf5/cross_sections.xml
+export OPENSN_CONSOLE=/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console
+export OMP_NUM_THREADS=40
+```
 
-OPENSN
-======
+Do not set `MGXS_PROCESSES=1`.
 
-Use the installed wrapper directly:
-  /home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console
+## Tests in the main repository
 
-Do not activate the OpenMC Conda environment for OpenSn.
-Do not source an OpenSn activation script.
-The wrapper sets its own child-local runtime environment.
+Run focused plotting and generation tests with:
 
-To run a generated OpenSn input manually:
-  cd /home/ragusa/work/Generate_MGXS/cases/<case>/run/opensn
-  /home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console -i input.py
+```bash
+cd /home/ragusa/repo/Generate_MGXS
+/home/ragusa/miniforge3/envs/openmc-env/bin/python -m pytest \
+    tests/test_plotting.py \
+    tests/test_generation_and_results.py
+```
 
-To preserve manual OpenSn logs:
-  cd /home/ragusa/work/Generate_MGXS/cases/<case>/run/opensn
-  /home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console -i input.py \
+Run the repository suite without solver execution tests with:
+
+```bash
+cd /home/ragusa/repo/Generate_MGXS
+/home/ragusa/miniforge3/envs/openmc-env/bin/python -m pytest \
+    --ignore=tests/test_execution.py
+```
+
+Run execution tests only when solver execution is explicitly in scope.
+
+## Running examples and work cases
+
+Repository examples can be run directly from their example directory:
+
+```bash
+cd /home/ragusa/repo/Generate_MGXS/examples/<case>
+/home/ragusa/miniforge3/envs/openmc-env/bin/python run.py
+```
+
+Prefer the external work area for production or exploratory runs whose outputs
+should remain outside the Git repository:
+
+```bash
+cd /home/ragusa/work/Generate_MGXS/cases/<case>
+/home/ragusa/miniforge3/envs/openmc-env/bin/python run.py
+```
+
+A case `run.py` is a full workflow. Depending on the case, it can prepare
+inputs, run OpenMC, process results, run another solver, and generate plots.
+Inspect the runner before executing it and do not assume it is plot-only.
+
+The generated OpenMC calculation can also be run explicitly from its generated
+directory:
+
+```bash
+cd <run-directory>/openmc
+/home/ragusa/miniforge3/envs/openmc-env/bin/python model.py run
+/home/ragusa/miniforge3/envs/openmc-env/bin/python model.py process
+```
+
+## Plot-only tasks
+
+When asked to regenerate plots from existing results, do not execute the case
+`run.py`, `prepare()`, `run_openmc()`, `model.py run`, or `model.py process`.
+Load the existing `openmc/openmc_result.json` and `openmc/mgxs.h5`, then invoke
+only the applicable plotting functions.
+
+For multi-domain cases such as `detector`, regenerate both the per-domain MGXS
+plots and the all-domain flux plots using `load_openmc_domain_spectra()` and
+`plot_openmc_domain_spectra()`.
+
+## OpenSn environment
+
+OpenMC and OpenSn must run as separate processes with separate environments.
+Never import OpenMC and `pyopensn` in the same Python process.
+
+Do not activate the OpenMC Conda environment for OpenSn and do not source an
+OpenSn activation script. Run the installed wrapper directly; it establishes
+its own child-local runtime environment:
+
+```bash
+cd <run-directory>/opensn
+/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console -i input.py
+```
+
+To preserve logs for a manual OpenSn run:
+
+```bash
+cd <run-directory>/opensn
+/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console -i input.py \
     > ../logs/opensn_manual.stdout \
     2> ../logs/opensn_manual.stderr
+```
 
-OpenSn monitoring:
-  ps -eo pid,ppid,etime,%cpu,%mem,cmd | grep -E '[o]pensn'
-  tail -f run/logs/opensn.stdout
-  tail -f run/logs/opensn_manual.stdout
+The expected result is `opensn/opensn_result.json` under the run directory.
 
-Expected result:
-  run/opensn/opensn_result.json
+## Monitoring and logs
 
-CURRENT FLATTOP STATE
-=====================
+Useful OpenMC checks from a case directory are:
 
-The work-area file:
-  /home/ragusa/work/Generate_MGXS/cases/flattop/case.py
+```bash
+tail -f run/logs/openmc_run.stdout
+ps -eo pid,ppid,etime,nlwp,%cpu,%mem,cmd \
+    | grep -E '[o]penmc|[m]odel.py|[p]ython run.py'
+ps -o pid,nlwp,etime,%cpu,%mem,cmd -C openmc
+ls -lh run/openmc/statepoint.*.h5
+```
 
-currently contains:
-  particles_per_batch=300_000
-  batches=520
-  inactive_batches=120
+Important OpenMC logs are:
 
-This calculation completed successfully:
-  Total histories: 156 million
-  Active histories: 120 million
-  OpenMC elapsed time: approximately 3345 seconds
-  OpenMC combined k_eff: 0.43224 +/- 0.00004
-  Statepoint: run/openmc/statepoint.520.h5
-  MGXS: run/openmc/mgxs.h5
+```text
+run/logs/openmc_run.stdout
+run/logs/openmc_run.stderr
+run/logs/openmc_process.stdout
+run/logs/openmc_process.stderr
+```
 
-However, `run.py` exits at the direct eigenvalue solver before it can invoke OpenSn or plotting:
-  ValueError: eigenvalue loss operator is singular
+Useful OpenSn checks are:
 
-This is now well diagnosed:
-  Direct loss matrix size: 30 x 30
-  Rank: 28
-  Exactly zero OpenMC groups: 0 and 1
-  Rows and columns 0 and 1 are entirely zero
-  The two smallest singular values are exactly zero
+```bash
+ps -eo pid,ppid,etime,%cpu,%mem,cmd | grep -E '[o]pensn'
+tail -f run/logs/opensn.stdout
+tail -f run/logs/opensn_manual.stdout
+```
 
-The remaining active subsystem is healthy:
-  Active matrix size: 28 x 28
-  Active matrix rank: 28
-  Condition number: 34.35
-  Reduced direct k_eff: 0.43222843706920405
-  Reduced direct residual: 1.87e-18
+## Numerical and output safeguards
 
-The generated OpenSn calculation was run manually and succeeded:
-  OpenSn k_eff: 0.4322284
-  Power iterations: 2
-  Final k_eff change: 2.487563e-12
-  Sweeps: 108
-  Balance: 8.003553e-11
-  Exit code: 0
+Do not change group structures, sources, tolerances, particle counts, batch
+counts, or other numerical settings unless explicitly authorized. Preserve
+existing output directories instead of deleting them.
 
-OpenSn sees the same zero groups as groups 28 and 29 because its energy-group ordering is reversed. It emits near-zero transport warnings, applies its built-in handling, and converges.
+## Work-area note: FlatTop snapshot (2026-08-10)
 
-Relevant logs:
-  /home/ragusa/work/Generate_MGXS/cases/flattop/run/logs/openmc_run.stdout
-  /home/ragusa/work/Generate_MGXS/cases/flattop/run/logs/opensn_manual.stdout
+The external FlatTop case currently uses 300,000 particles per batch, 520
+batches, and 120 inactive batches. Its 156-million-history OpenMC calculation
+completed with `k_eff = 0.43224 +/- 0.00004`.
 
-Relevant outputs:
-  /home/ragusa/work/Generate_MGXS/cases/flattop/run/openmc/statepoint.520.h5
-  /home/ragusa/work/Generate_MGXS/cases/flattop/run/openmc/mgxs.h5
-  /home/ragusa/work/Generate_MGXS/cases/flattop/run/openmc/openmc_result.json
-  /home/ragusa/work/Generate_MGXS/cases/flattop/run/opensn/opensn_result.json
+The full 30-group direct eigenvalue solve is singular because groups 0 and 1
+have structurally zero rows and columns. The remaining 28-group subsystem is
+full rank and gives `k_eff = 0.43222843706920405`. A manual OpenSn run converged
+to `k_eff = 0.4322284`; OpenSn sees the same empty groups as groups 28 and 29
+because its group ordering is reversed.
 
-Conclusion:
-  Increasing OpenMC histories does not eliminate the final two structurally empty groups.
-  The full direct solver still fails because it attempts to solve the unreduced 30-group matrix.
-  OpenSn handles the degenerate groups and converges.
-  The smallest likely repository fix is for the direct eigenvalue solver to remove structurally disconnected zero rows/columns, solve the active subsystem, and reconstruct zero flux in the excluded groups.
+Relevant work artifacts are under:
 
-Do not change the group structure, source, tolerances, or other numerical settings unless explicitly authorized. Preserve existing output directories instead of deleting them.
+```text
+/home/ragusa/work/Generate_MGXS/cases/flattop/run
+```
+
+Before relying on this snapshot, verify the current work-area files and output
+timestamps. The likely repository fix is for the direct eigenvalue solver to
+remove structurally disconnected zero rows and columns, solve the active
+subsystem, and reconstruct zero flux in excluded groups.
