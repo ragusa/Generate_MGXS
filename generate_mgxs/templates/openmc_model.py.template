@@ -352,7 +352,10 @@ def write_inputs():
 
 def run_transport():
     """Run OpenMC and write its statepoint in this openmc directory."""
-    MODEL.run(threads=int(os.getenv("MGXS_PROCESSES", "1")))
+    requested_threads = os.getenv("MGXS_PROCESSES")
+    MODEL.run(
+        threads=None if requested_threads is None else int(requested_threads)
+    )
 
 
 def _canonical_xs(mgxs, quantity):

@@ -18,6 +18,7 @@ from .case import (
     Case,
     _artifact,
     _geometry_record,
+    _integer,
     _material_records,
     _mgxs_domain_records,
     _update_run_metadata,
@@ -109,7 +110,7 @@ def run_openmc(
     cross_sections,
     python_executable=sys.executable,
     operation="all",
-    threads=1,
+    threads=None,
     timeout=None,
 ) -> Path:
     """Run the generated OpenMC input, capture logs, and verify its outputs."""
@@ -126,6 +127,8 @@ def run_openmc(
 
     if operation not in {"write-input", "run", "process", "all"}:
         raise ValueError("operation must be write-input, run, process, or all")
+    if threads is not None:
+        threads = _integer(threads, "threads", minimum=1)
 
     # Record the actual OpenMC runtime rather than inferring it from the Python
     # executable path or the environment used during preparation.
@@ -139,7 +142,7 @@ def run_openmc(
         raise RuntimeError("OpenMC software identity could not be established")
 
     operations = ("run", "process") if operation == "all" else (operation,)
-    commands = [[python, str(model), item] for item in operations]
+    commands = [[python, "-u", str(model), item] for item in operations]
 
     openmc_metadata = {
         "version": identity.stdout.strip().splitlines()[-1],
@@ -150,6 +153,7 @@ def run_openmc(
             "sha256": sha256(cross_sections.read_bytes()).hexdigest(),
         },
         "commands": commands,
+        "requested_threads": threads,
     }
     _update_run_metadata(run, openmc=openmc_metadata)
 
@@ -164,7 +168,10 @@ def run_openmc(
         str(Path(python).parent) + os.pathsep + environment.get("PATH", "")
     )
     environment["OPENMC_CROSS_SECTIONS"] = str(cross_sections)
-    environment["MGXS_PROCESSES"] = str(threads)
+    if threads is None:
+        environment.pop("MGXS_PROCESSES", None)
+    else:
+        environment["MGXS_PROCESSES"] = str(threads)
 
     for phase, command in zip(operations, commands):
         log_phase = phase.replace("-", "_")

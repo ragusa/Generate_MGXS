@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import runpy
 import shutil
 import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -60,6 +62,7 @@ def fake_openmc(path: Path, behavior="success"):
             "import sys\n"
             "if sys.argv[1] == '-c': print('0.15.0')\n"
             "else:\n"
+            "    assert sys.argv[1] == '-u'\n"
             "    print('failure stdout before exit', flush=True)\n"
             "    print('failure stderr before exit', file=sys.stderr, flush=True)\n"
             "    raise SystemExit(7)\n",
@@ -73,13 +76,18 @@ def fake_openmc(path: Path, behavior="success"):
 (cwd.parent / "diagnostics/mgxs_uncertainty.json").write_text("{}")
 '''
     return executable_script(path, f'''import json
+import os
 import sys
 from pathlib import Path
 if sys.argv[1] == "-c":
     print("0.15.0")
     raise SystemExit(0)
+assert sys.argv[1] == "-u"
 cwd = Path.cwd()
-operation = sys.argv[2]
+operation = sys.argv[3]
+(cwd / f"{{operation}}_threads.txt").write_text(
+    os.environ.get("MGXS_PROCESSES", "<missing>")
+)
 print(f"{{operation}} stdout", flush=True)
 print(f"{{operation}} stderr", file=sys.stderr, flush=True)
 if operation == "run":
@@ -104,17 +112,63 @@ raise SystemExit({code})
 ''')
 
 
-def test_openmc_success_and_required_outputs(one_case, tmp_path):
+def successful_openmc_subprocess(calls):
+    """Return a subprocess.run replacement that creates managed outputs."""
+    def run(command, **kwargs):
+        if command[1] == "-c":
+            return subprocess.CompletedProcess(
+                command, 0, stdout="0.15.0\n", stderr=""
+            )
+
+        phase = command[-1]
+        calls.append(
+            {
+                "command": command,
+                "environment": kwargs["env"],
+                "stdout": Path(kwargs["stdout"].name).name,
+                "stderr": Path(kwargs["stderr"].name).name,
+            }
+        )
+        kwargs["stdout"].write(f"{phase} stdout\n")
+        kwargs["stderr"].write(f"{phase} stderr\n")
+
+        cwd = Path(kwargs["cwd"])
+        if phase == "run":
+            (cwd / "statepoint.2.h5").write_bytes(b"fixture")
+        elif phase == "process":
+            (cwd / "mgxs.h5").write_bytes(b"fixture")
+            (cwd / "openmc_result.json").write_text(
+                json.dumps(
+                    {
+                        "energy_bounds": [1, 2],
+                        "flux": [1],
+                        "std_dev": [0.1],
+                    }
+                )
+            )
+            (cwd.parent / "diagnostics").mkdir(exist_ok=True)
+            (cwd.parent / "diagnostics/mgxs_uncertainty.json").write_text("{}")
+
+        return subprocess.CompletedProcess(command, 0)
+
+    return run
+
+
+def test_openmc_success_and_required_outputs(one_case, tmp_path, monkeypatch):
     # OpenMC execution depends only on its generated model, so the helper must
     # work identically when OpenSn input was deliberately omitted.
     run = prepare(one_case, tmp_path / "run", solvers=("openmc",))
     cross_sections = tmp_path / "cross_sections.xml"
     cross_sections.write_text("<cross_sections/>")
 
+    calls = []
+    monkeypatch.setattr(subprocess, "run", successful_openmc_subprocess(calls))
+    monkeypatch.setenv("MGXS_PROCESSES", "99")
+
     result = run_openmc(
         run,
         cross_sections=cross_sections,
-        python_executable=fake_openmc(tmp_path / "openmc"),
+        python_executable=sys.executable,
     )
 
     assert result == run / "openmc/mgxs.h5"
@@ -124,6 +178,88 @@ def test_openmc_success_and_required_outputs(one_case, tmp_path):
     assert (run / "logs/openmc_process.stdout").read_text() == "process stdout\n"
     assert (run / "logs/openmc_process.stderr").read_text() == "process stderr\n"
     assert (run / "diagnostics/mgxs_uncertainty.json").is_file()
+    assert [item["stdout"] for item in calls] == [
+        "openmc_run.stdout",
+        "openmc_process.stdout",
+    ]
+    assert [item["stderr"] for item in calls] == [
+        "openmc_run.stderr",
+        "openmc_process.stderr",
+    ]
+    assert all("MGXS_PROCESSES" not in item["environment"] for item in calls)
+
+    metadata = json.loads((run / "_metadata/run.json").read_text())
+    assert metadata["openmc"]["requested_threads"] is None
+    assert metadata["openmc"]["commands"] == [
+        [str(Path(sys.executable).resolve()), "-u", str(run / "openmc/model.py"), phase]
+        for phase in ("run", "process")
+    ]
+    assert {item["path"] for item in metadata["artifacts"]} == {
+        "diagnostics/mgxs_uncertainty.json",
+        "openmc/mgxs.h5",
+        "openmc/model.py",
+        "openmc/openmc_result.json",
+        "openmc/statepoint.2.h5",
+    }
+
+
+def test_openmc_explicit_threads_are_injected_exactly(
+    one_case, tmp_path, monkeypatch
+):
+    run = prepare(one_case, tmp_path / "run", solvers=("openmc",))
+    cross_sections = tmp_path / "cross_sections.xml"
+    cross_sections.write_text("<cross_sections/>")
+    calls = []
+    monkeypatch.setattr(subprocess, "run", successful_openmc_subprocess(calls))
+
+    run_openmc(
+        run,
+        cross_sections=cross_sections,
+        python_executable=sys.executable,
+        operation="run",
+        threads=6,
+    )
+
+    assert calls[0]["environment"]["MGXS_PROCESSES"] == "6"
+    metadata = json.loads((run / "_metadata/run.json").read_text())["openmc"]
+    assert metadata["requested_threads"] == 6
+
+
+@pytest.mark.parametrize("threads", (0, -1, 1.5, "2", True, np.bool_(True)))
+def test_openmc_rejects_invalid_explicit_threads(one_case, tmp_path, threads):
+    run = prepare(one_case, tmp_path / "run", solvers=("openmc",))
+    cross_sections = tmp_path / "cross_sections.xml"
+    cross_sections.write_text("<cross_sections/>")
+
+    with pytest.raises(ValueError, match="threads must be an integer >= 1"):
+        run_openmc(
+            run,
+            cross_sections=cross_sections,
+            python_executable=fake_openmc(tmp_path / "openmc"),
+            threads=threads,
+        )
+
+
+def test_generated_openmc_transport_uses_optional_thread_environment(
+    one_case, tmp_path, monkeypatch
+):
+    run = prepare(one_case, tmp_path / "run", solvers=("openmc",))
+    generated = runpy.run_path(run / "openmc/model.py")
+    calls = []
+
+    class FakeModel:
+        def run(self, *, threads):
+            calls.append(threads)
+
+    transport = generated["run_transport"]
+    transport.__globals__["MODEL"] = FakeModel()
+
+    monkeypatch.delenv("MGXS_PROCESSES", raising=False)
+    transport()
+    monkeypatch.setenv("MGXS_PROCESSES", "8")
+    transport()
+
+    assert calls == [None, 8]
 
 
 def test_openmc_separate_phase_calls_preserve_each_others_logs(one_case, tmp_path):
