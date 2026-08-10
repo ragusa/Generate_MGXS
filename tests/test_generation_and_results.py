@@ -571,6 +571,31 @@ def test_examples_show_the_complete_workflows():
     assert "/home/ragusa/" not in flattop
 
 
+@pytest.mark.parametrize(
+    "example",
+    ("be9", "hdpe", "flattop", "detector", "pu9_hdpe"),
+)
+def test_per_case_example_runner_uses_its_run_directory_directly(example):
+    runner = Path(__file__).parents[1] / "examples" / example / "run.py"
+    tree = ast.parse(runner.read_text())
+    prepare_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "prepare"
+    ]
+
+    assert len(prepare_calls) == 1
+    directory = prepare_calls[0].args[1]
+    assert isinstance(directory, ast.Call)
+    assert isinstance(directory.func, ast.Name)
+    assert directory.func.id == "Path"
+    assert len(directory.args) == 1
+    assert isinstance(directory.args[0], ast.Constant)
+    assert directory.args[0].value == "run"
+
+
 def test_prepare_does_not_execute_subprocesses(one_case, tmp_path, monkeypatch):
     """Preparation is generation only, which is essential for external scheduling."""
     import subprocess

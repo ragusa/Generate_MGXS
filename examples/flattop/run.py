@@ -17,7 +17,7 @@ from case import CASE
 
 
 # Preparation writes standalone inputs only; Bash or SLURM may run them later.
-run_path = prepare(CASE, Path("run/flattop"))
+run_path = prepare(CASE, Path("run"))
 
 run_openmc(
     run_path,

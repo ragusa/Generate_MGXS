@@ -12,7 +12,7 @@ from case import CASE
 
 # --- Preparation: generates files but starts no solver --------------------
 # prepare() writes independent inputs and metadata only; it starts no process.
-run_path = prepare(CASE, Path("run/be9"))
+run_path = prepare(CASE, Path("run"))
 print(f"Prepared {run_path}; generated inputs may instead be submitted externally.")
 
 # --- OpenMC transport -----------------------------------------------------

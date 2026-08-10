@@ -15,7 +15,7 @@ from generate_mgxs import (
 from case import CASE
 
 
-run_path = prepare(CASE, Path("run/detector"), solvers=("openmc",))
+run_path = prepare(CASE, Path("run"), solvers=("openmc",))
 run_openmc(
     run_path,
     cross_sections=Path(os.environ["OPENMC_CROSS_SECTIONS"]),
