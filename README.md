@@ -1,10 +1,11 @@
 # Generate MGXS
 
 `generate_mgxs` is a small, explicit bridge between OpenMC and OpenSn for
-homogeneous multigroup calculations. It supports fixed-source calculations and
-one-material k-eigenvalue verification. Python-facing energy arrays always run
-from low to high physical energy. OpenMC MGXS arrays and OpenSn group numbering
-are converted at their boundaries only.
+managed multigroup calculations. It supports fixed-source and k-eigenvalue
+operation, homogeneous OpenMC/OpenSn verification cases, and a deliberately
+limited OpenMC-only concentric-cylinder geometry. Python-facing energy arrays
+always run from low to high physical energy. OpenMC MGXS arrays and OpenSn group
+numbering are converted at their boundaries only.
 
 Define a `Case`, then prepare an independent run directory:
 
@@ -51,6 +52,26 @@ run_path = prepare(
     solvers=("openmc",),
 )
 ```
+
+The managed cylindrical form consists only of ordered radial cell records, a
+finite axial height, boundary conditions, and an optional outer rectangular
+prism. Each cell declares its XSdata name explicitly, so two cells may share a
+physical material without sharing an MGXS dataset:
+
+```python
+geometry = ConcentricGeometry(
+    regions=(
+        ConcentricCell("Inner", material_a, "inner", 1.0),
+        ConcentricCell("Shell", material_b, "shell", 2.0),
+    ),
+    height_cm=4.0,
+    outer_radial_boundary="reflective",
+)
+```
+
+Concentric cases must be prepared with `solvers=("openmc",)`; requesting an
+OpenSn input fails during preparation because OpenSn does not recreate this
+cylindrical CSG model.
 
 The resulting directory contains `openmc/model.py` and `_metadata/run.json`,
 with no OpenSn directory. This is useful for large material libraries,
@@ -139,8 +160,10 @@ The returned dictionary contains the applicable cross-section, chi,
 scattering-moment, and derived fission-production figures. Energy axes use the
 package's ascending-eV convention; plotting never requires OpenSn.
 
-Complete, commented Be-9, UO2-in-HDPE, and homogeneous FlatTop definitions are
-in `examples/`. FlatTop uses `run_mode="eigenvalue"`; its direct comparison is:
+Complete, commented Be-9, UO2-in-HDPE, homogeneous FlatTop, detector, and
+Pu9+HDPE definitions are in `examples/`. The detector and Pu9+HDPE cases use
+the OpenMC-only concentric geometry. FlatTop uses `run_mode="eigenvalue"`; its
+direct comparison is:
 
 ```python
 direct = solve_infinite_medium_eigenvalue(mgxs)
