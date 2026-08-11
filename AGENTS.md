@@ -66,6 +66,17 @@ cd /home/ragusa/repo/Generate_MGXS
 ```
 
 Run execution tests only when solver execution is explicitly in scope.
+The execution-test fixtures read these optional environment variables rather
+than embedding machine-specific paths:
+
+```bash
+export OPENMC_PYTHON=/home/ragusa/miniforge3/envs/openmc-env/bin/python
+export OPENSN_MPIEXEC=/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-mpiexec
+export OPENSN_FISSION_MGXS=/home/ragusa/repo/opensn/test/assets/xs/u235_84g.h5
+```
+
+`OPENMC_CROSS_SECTIONS` and `OPENSN_CONSOLE` come from the main environment
+block above. Unconfigured execution tests skip their external-runtime checks.
 
 ## Running examples and work cases
 
