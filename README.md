@@ -170,7 +170,7 @@ prism. Every cell declares its logical XSdata name, so cells can share a
 physical material without aliasing their MGXS datasets:
 
 ```python
-from generate_mgxs import ConcentricCell, ConcentricGeometry
+from generate_mgxs import ConcentricCell, ConcentricGeometry, OuterBoxRegion
 
 geometry = ConcentricGeometry(
     regions=(
@@ -178,9 +178,16 @@ geometry = ConcentricGeometry(
         ConcentricCell("Shell", material_b, "shell", 2.0),
     ),
     height_cm=4.0,
-    outer_radial_boundary="reflective",
+    outer_region=OuterBoxRegion("Outer", outer_material, "outer"),
+    outer_half_widths_cm=(3.0, 3.0),
+    outer_xy_boundaries=("reflective",) * 4,
 )
 ```
+
+Every `ConcentricCell` is cylindrical and therefore requires an outer radius.
+`OuterBoxRegion` instead names the rectangular-prism remainder outside the
+largest cylinder. If there is no surrounding box, omit those three outer-box
+arguments and set `outer_radial_boundary` on the largest cylinder instead.
 
 All nonhomogeneous cases are OpenMC-only and must use
 `solvers=("openmc",)`. OpenSn and the direct solvers are intentionally limited

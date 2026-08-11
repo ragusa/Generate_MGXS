@@ -1,6 +1,12 @@
 """Legacy He-3/HDPE/Cd/Al detector as a managed OpenMC-only case."""
 
-from generate_mgxs import Case, ConcentricCell, ConcentricGeometry, Material
+from generate_mgxs import (
+    Case,
+    ConcentricCell,
+    ConcentricGeometry,
+    Material,
+    OuterBoxRegion,
+)
 
 
 HE3 = Material(
@@ -39,7 +45,7 @@ GEOMETRY = ConcentricGeometry(
     ),
     height_cm=10.0,
     axial_boundaries=("reflective", "reflective"),
-    outer_region=ConcentricCell("Outer", HDPE, "outer"),
+    outer_region=OuterBoxRegion("Outer", HDPE, "outer"),
     outer_half_widths_cm=(5.0, 5.0),
     outer_xy_boundaries=("reflective",) * 4,
 )

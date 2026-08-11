@@ -7,6 +7,7 @@ from generate_mgxs import (
     ConcentricCell,
     ConcentricGeometry,
     Material,
+    OuterBoxRegion,
     prepare,
 )
 
@@ -96,10 +97,18 @@ def _use_statepoint_directory(selector, directory):
 
 def test_concentric_geometry_validates_only_the_required_shape():
     inner = _material("inner")
-    outer = ConcentricCell("Outer", inner, "outer")
+    outer = OuterBoxRegion("Outer", inner, "outer")
 
     with pytest.raises(ValueError, match="positive"):
         ConcentricCell("Bad", inner, "bad", 0.0)
+    with pytest.raises(ValueError, match="OuterBoxRegion"):
+        ConcentricGeometry(
+            regions=(ConcentricCell("Inner", inner, "inner", 1.0),),
+            height_cm=2.0,
+            outer_region=ConcentricCell("NotOuterBox", inner, "not_outer", 2.0),
+            outer_half_widths_cm=(3.0, 3.0),
+            outer_xy_boundaries=("reflective",) * 4,
+        )
     with pytest.raises(ValueError, match="strictly increasing"):
         _geometry(radii=(2.0, 1.0))
     with pytest.raises(ValueError, match="height"):

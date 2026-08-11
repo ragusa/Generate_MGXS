@@ -266,14 +266,14 @@ class Material:
 
 
 class ConcentricCell:
-    """One explicitly named cell/MGXS domain in a concentric geometry."""
+    """One explicitly named cylindrical cell/MGXS domain."""
 
     def __init__(
         self,
         name: str,
         material: Material,
         xsdata_name: str,
-        outer_radius_cm: float | None = None,
+        outer_radius_cm: float,
     ):
         if not isinstance(name, str) or not name.strip():
             raise ValueError("cell name cannot be empty")
@@ -285,11 +285,25 @@ class ConcentricCell:
         self.name = name
         self.material = material
         self.xsdata_name = xsdata_name
-        self.outer_radius_cm = (
-            None
-            if outer_radius_cm is None
-            else _positive_float(outer_radius_cm, "cell outer radius")
+        self.outer_radius_cm = _positive_float(
+            outer_radius_cm, "cell outer radius"
         )
+
+
+class OuterBoxRegion:
+    """The rectangular-prism remainder outside all concentric cylinders."""
+
+    def __init__(self, name: str, material: Material, xsdata_name: str):
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("outer box region name cannot be empty")
+        if not isinstance(material, Material):
+            raise ValueError("outer box region material must be a Material")
+        if not isinstance(xsdata_name, str) or not xsdata_name.strip():
+            raise ValueError("outer box region logical XS name cannot be empty")
+
+        self.name = name
+        self.material = material
+        self.xsdata_name = xsdata_name
 
 
 class NestedBoxGeometry:
@@ -348,7 +362,7 @@ class ConcentricGeometry:
         height_cm,
         axial_boundaries=("reflective", "reflective"),
         outer_radial_boundary: Literal["reflective", "vacuum"] | None = None,
-        outer_region: ConcentricCell | None = None,
+        outer_region: OuterBoxRegion | None = None,
         outer_half_widths_cm=None,
         outer_xy_boundaries=None,
     ):
@@ -362,9 +376,6 @@ class ConcentricGeometry:
             isinstance(region, ConcentricCell) for region in regions
         ):
             raise ValueError("concentric regions must contain ConcentricCell records")
-        if any(region.outer_radius_cm is None for region in regions):
-            raise ValueError("each concentric radial region requires an outer radius")
-
         radii = tuple(region.outer_radius_cm for region in regions)
         if any(outer <= inner for inner, outer in zip(radii, radii[1:])):
             raise ValueError("concentric radii must be strictly increasing")
@@ -393,10 +404,8 @@ class ConcentricGeometry:
             half_widths = None
             xy_boundaries = None
         else:
-            if not isinstance(outer_region, ConcentricCell):
-                raise ValueError("outer region must be a ConcentricCell")
-            if outer_region.outer_radius_cm is not None:
-                raise ValueError("the rectangular outer region cannot have a radius")
+            if not isinstance(outer_region, OuterBoxRegion):
+                raise ValueError("outer region must be an OuterBoxRegion")
             if outer_half_widths_cm is None or outer_xy_boundaries is None:
                 raise ValueError(
                     "outer region, half-widths, and x-y boundaries must be supplied together"
@@ -443,7 +452,7 @@ class ConcentricGeometry:
         self.outer_xy_boundaries = xy_boundaries
 
     @property
-    def domains(self) -> tuple[ConcentricCell, ...]:
+    def domains(self) -> tuple[ConcentricCell | OuterBoxRegion, ...]:
         return self.regions + (
             (self.outer_region,) if self.outer_region is not None else ()
         )
