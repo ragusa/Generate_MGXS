@@ -159,7 +159,7 @@ def test_concentric_geometry_is_run_mode_independent():
 def test_prepare_rejects_opensn_for_concentric_geometry_before_writing(tmp_path):
     destination = tmp_path / "unsupported"
 
-    with pytest.raises(ValueError, match="OpenSn.*concentric"):
+    with pytest.raises(ValueError, match="homogeneous one-material"):
         prepare(_case(_geometry()), destination)
 
     assert not destination.exists()

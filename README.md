@@ -8,7 +8,7 @@ homogeneous direct checks, and plots spectra and multigroup cross sections.
 The package supports:
 
 - fixed-source and k-eigenvalue OpenMC calculations;
-- homogeneous one-material and target/moderator box models;
+- homogeneous one-material and explicit nested target/moderator box models;
 - an intentionally limited OpenMC-only concentric-cylinder geometry;
 - OpenSn homogeneous verification calculations;
 - direct homogeneous fixed-source and rank-one eigenvalue checks; and
@@ -72,9 +72,9 @@ case = Case(
 run_path = prepare(case, Path("results/be9"))
 ```
 
-`prepare()` never starts a subprocess. By default it writes independent OpenMC
-and OpenSn inputs plus provenance metadata. OpenMC-only preparation is
-explicit:
+`prepare()` never starts a subprocess. For a homogeneous one-material case, it
+writes independent OpenMC and OpenSn inputs plus provenance metadata by
+default. OpenMC-only preparation is explicit:
 
 ```python
 run_path = prepare(
@@ -120,8 +120,9 @@ lanl70_case = Case(
 ```
 
 In every case, `case.energy_bounds_ev` contains the resolved ascending
-numerical boundaries used by source integration, OpenSn, direct solutions,
-and result comparison.
+numerical boundaries used by source integration, OpenMC tallying, direct
+solutions, result comparison, and homogeneous OpenSn verification when
+requested.
 
 ## Materials and geometry
 
@@ -144,6 +145,25 @@ isotope expansion to OpenMC. Composition values are nonnegative relative atomic
 amounts. They need not sum to one and are passed unchanged to OpenMC with
 `percent_type="ao"`.
 
+Every nonhomogeneous case declares its geometry explicitly. A target box inside
+a larger moderator box uses `NestedBoxGeometry`:
+
+```python
+from generate_mgxs import NestedBoxGeometry
+
+geometry = NestedBoxGeometry(
+    target=target_material,
+    moderator=moderator_material,
+    target_dimensions_cm=(0.4, 0.4, 0.4),
+    outer_dimensions_cm=(1.5, 1.5, 1.5),
+    boundaries=("reflective",) * 6,
+)
+```
+
+The two materials use `role="target"` and `role="moderator"`, respectively,
+and both are listed in the enclosing `Case.materials`. Dimensions and boundary
+conditions belong to the explicit geometry rather than to `Case`.
+
 The managed concentric geometry consists of ordered radial cells, a finite
 axial height, boundary conditions, and an optional surrounding rectangular
 prism. Every cell declares its logical XSdata name, so cells can share a
@@ -162,8 +182,9 @@ geometry = ConcentricGeometry(
 )
 ```
 
-Concentric cases are OpenMC-only and must use `solvers=("openmc",)`. Generated
-OpenSn verification does not reproduce the concentric CSG geometry.
+All nonhomogeneous cases are OpenMC-only and must use
+`solvers=("openmc",)`. OpenSn and the direct solvers are intentionally limited
+to homogeneous one-material verification problems.
 
 ## Run the generated workflow
 
@@ -305,7 +326,7 @@ simple orchestration scripts:
 | --- | --- | --- |
 | `be9` | Homogeneous fixed source | OpenMC, direct, OpenSn, plots |
 | `hdpe` | Homogeneous fixed source | OpenMC, direct, OpenSn, plots |
-| `moderated` | LANL70 UO2 box inside an HDPE box | OpenMC, per-domain MGXS, OpenSn |
+| `moderated` | LANL70 UO2 box inside an HDPE box | OpenMC-only, per-domain MGXS plots |
 | `flattop` | Homogeneous eigenvalue | OpenMC, OpenSn, plots; direct call commented out |
 | `detector` | Concentric fixed source | OpenMC-only, per-domain and all-domain plots |
 | `pu9_hdpe` | Concentric eigenvalue | OpenMC-only, per-domain plots |
@@ -324,22 +345,22 @@ python run.py
 
 ## OpenSn verification scope
 
-Generated OpenSn input is a verification calculation, not a second model of the
-OpenMC geometry. Each material domain in `openmc/mgxs.h5` is loaded and solved
-independently in a homogeneous, all-reflecting 2 cm cube with two cells per axis
-(eight cells total). A fixed product quadrature supplies eight directions, and
-P0 scattering is used for the isotropic infinite-homogeneous scalar-flux check.
+Generated OpenSn input verifies one homogeneous material in an all-reflecting
+2 cm cube with two cells per axis (eight cells total). A fixed product
+quadrature supplies eight directions, and P0 scattering is used for the
+isotropic infinite-homogeneous scalar-flux check. OpenSn input generation is
+rejected for nested-box, concentric, and other nonhomogeneous cases.
 
 Fixed-source cases use a steady-state source solver. Homogeneous eigenvalue
 cases use `PowerIterationKEigenSolver` with no external volumetric source and
 report normalized flux shape, k-effective, power iterations, sweeps, balance,
 and final relative k change.
 
-OpenMC target/moderator dimensions and boundary choices therefore do not
-control OpenSn cost. `scattering_order` remains a `Case` setting because it
-controls MGXS moments produced by OpenMC; the OpenSn verifier deliberately uses
-only P0. Case-specific OpenSn controls are GMRES tolerance, maximum iterations,
-restart, and the eigenvalue convergence controls.
+The homogeneous OpenMC box dimensions and boundary choices do not control the
+fixed OpenSn verification cube. `scattering_order` remains a `Case` setting
+because it controls MGXS moments produced by OpenMC; the OpenSn verifier
+deliberately uses only P0. Case-specific OpenSn controls are GMRES tolerance,
+maximum iterations, restart, and the eigenvalue convergence controls.
 
 ## Tests
 

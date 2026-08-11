@@ -90,6 +90,31 @@ def _integer(value, name: str, *, minimum: int) -> int:
     return result
 
 
+def _dimensions(values, name: str) -> tuple[float, float, float]:
+    try:
+        dimensions = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must contain three finite positive values") from error
+
+    if len(dimensions) != 3 or any(
+        not math.isfinite(value) or value <= 0.0 for value in dimensions
+    ):
+        raise ValueError(f"{name} must contain three finite positive values")
+    return dimensions
+
+
+def _box_boundaries(values) -> tuple[str, ...]:
+    try:
+        boundaries = tuple(values)
+    except TypeError as error:
+        raise ValueError("six reflective/vacuum boundary values are required") from error
+    if len(boundaries) != 6 or any(
+        boundary not in {"reflective", "vacuum"} for boundary in boundaries
+    ):
+        raise ValueError("six reflective/vacuum boundary values are required")
+    return boundaries
+
+
 def _openmc_energy_bounds(name: str) -> tuple[float, ...]:
     """Resolve one canonical OpenMC group name without a module-level import."""
     try:
@@ -267,6 +292,52 @@ class ConcentricCell:
         )
 
 
+class NestedBoxGeometry:
+    """A rectangular target embedded in a larger rectangular moderator."""
+
+    def __init__(
+        self,
+        *,
+        target: Material,
+        moderator: Material,
+        target_dimensions_cm,
+        outer_dimensions_cm,
+        boundaries=("reflective",) * 6,
+    ):
+        if not isinstance(target, Material) or target.role != "target":
+            raise ValueError("nested-box target must be a Material with the target role")
+        if not isinstance(moderator, Material) or moderator.role != "moderator":
+            raise ValueError(
+                "nested-box moderator must be a Material with the moderator role"
+            )
+        if target is moderator:
+            raise ValueError("nested-box target and moderator must be distinct materials")
+
+        target_dimensions = _dimensions(
+            target_dimensions_cm, "nested-box target dimensions"
+        )
+        outer_dimensions = _dimensions(
+            outer_dimensions_cm, "nested-box outer dimensions"
+        )
+        if any(
+            outside <= inside
+            for inside, outside in zip(target_dimensions, outer_dimensions)
+        ):
+            raise ValueError(
+                "nested-box outer dimensions must strictly exceed target dimensions"
+            )
+
+        self.target = target
+        self.moderator = moderator
+        self.target_dimensions_cm = target_dimensions
+        self.outer_dimensions_cm = outer_dimensions
+        self.boundaries = _box_boundaries(boundaries)
+
+    @property
+    def materials(self) -> tuple[Material, Material]:
+        return self.target, self.moderator
+
+
 class ConcentricGeometry:
     """Finite z-aligned cylindrical cells with an optional surrounding prism."""
 
@@ -392,8 +463,8 @@ class Case:
         run_mode: Literal["fixed_source", "eigenvalue"] = "fixed_source",
         source_probabilities=None,
         outer_dimensions_cm=None,
-        boundaries=("reflective",) * 6,
-        geometry: ConcentricGeometry | None = None,
+        boundaries=None,
+        geometry: NestedBoxGeometry | ConcentricGeometry | None = None,
         source_bounds_cm=None,
         source_energy_bounds_ev=None,
         particles_per_batch: int = 25_000,
@@ -421,16 +492,23 @@ class Case:
         if len(set(logical_names)) != len(logical_names):
             raise ValueError("logical material names must be unique")
 
-        if geometry is not None and not isinstance(geometry, ConcentricGeometry):
-            raise ValueError("geometry must be a ConcentricGeometry")
+        if geometry is not None and not isinstance(
+            geometry, (NestedBoxGeometry, ConcentricGeometry)
+        ):
+            raise ValueError(
+                "geometry must be a NestedBoxGeometry or ConcentricGeometry"
+            )
         if geometry is None:
             roles = {material.role for material in materials}
-            if len(materials) == 1 and roles != {"homogeneous"}:
+            if len(materials) != 1:
+                raise ValueError("multiple materials require an explicit geometry")
+            if roles != {"homogeneous"}:
                 raise ValueError("one material must have the homogeneous role")
-            if len(materials) == 2 and roles != {"target", "moderator"}:
-                raise ValueError("two materials must have target and moderator roles")
-            if len(materials) > 2:
-                raise ValueError("box geometry supports one material or a target and moderator")
+        elif isinstance(geometry, NestedBoxGeometry):
+            if len(materials) != 2 or set(materials) != set(geometry.materials):
+                raise ValueError(
+                    "nested-box target and moderator must match the declared materials"
+                )
         else:
             declared = tuple(materials)
             used = tuple(dict.fromkeys(domain.material for domain in geometry.domains))
@@ -451,8 +529,6 @@ class Case:
 
         if run_mode not in {"fixed_source", "eigenvalue"}:
             raise ValueError("run_mode must be fixed_source or eigenvalue")
-        if run_mode == "eigenvalue" and geometry is None and len(materials) != 1:
-            raise ValueError("eigenvalue cases require one homogeneous material")
         if run_mode == "fixed_source":
             if source_kind not in {"uniform_energy", "watt", "grouped"}:
                 raise ValueError(
@@ -515,25 +591,33 @@ class Case:
                 )
 
         if geometry is None:
-            target = self._dimensions(target_dimensions_cm, "target dimensions")
-            outer = None if outer_dimensions_cm is None else self._dimensions(
+            target = _dimensions(target_dimensions_cm, "target dimensions")
+            outer = None if outer_dimensions_cm is None else _dimensions(
                 outer_dimensions_cm, "outer dimensions"
             )
-
-            if len(materials) == 2:
-                if outer is None or any(outside <= inside for inside, outside in zip(target, outer)):
-                    raise ValueError("moderated outer dimensions must strictly exceed target dimensions")
-            elif outer is not None and outer != target:
+            if outer is not None and outer != target:
                 raise ValueError("a homogeneous case does not have distinct outer dimensions")
+            resolved_boundaries = _box_boundaries(
+                ("reflective",) * 6 if boundaries is None else boundaries
+            )
+        elif isinstance(geometry, NestedBoxGeometry):
+            if target_dimensions_cm is not None or outer_dimensions_cm is not None:
+                raise ValueError(
+                    "nested-box geometry owns the target and outer dimensions"
+                )
+            if boundaries is not None:
+                raise ValueError("nested-box geometry owns the boundary conditions")
+            target = geometry.target_dimensions_cm
+            outer = geometry.outer_dimensions_cm
+            resolved_boundaries = geometry.boundaries
         else:
             if target_dimensions_cm is not None or outer_dimensions_cm is not None:
                 raise ValueError("concentric geometry does not use box target/outer dimensions")
+            if boundaries is not None:
+                raise ValueError("concentric geometry owns the boundary conditions")
             target = None
             outer = None
-
-        boundaries = tuple(boundaries)
-        if len(boundaries) != 6 or any(x not in {"reflective", "vacuum"} for x in boundaries):
-            raise ValueError("six reflective/vacuum boundary values are required")
+            resolved_boundaries = None
 
         if source_bounds_cm is None:
             if target is None:
@@ -564,7 +648,7 @@ class Case:
         self._grouped_source_probabilities = grouped
         self.target_dimensions_cm = target
         self.outer_dimensions_cm = outer
-        self.boundaries = boundaries
+        self.boundaries = resolved_boundaries
         self.geometry = geometry
         self.source_bounds_cm = source_bounds
         self.source_energy_bounds_ev = uniform_energy_bounds
@@ -598,19 +682,6 @@ class Case:
         self.watt_a_mev = watt_a_mev
         self.watt_b_per_mev = watt_b_per_mev
 
-    @staticmethod
-    def _dimensions(values, name: str) -> tuple[float, float, float]:
-        try:
-            dimensions = tuple(float(value) for value in values)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"{name} must contain three finite positive values") from error
-
-        if len(dimensions) != 3 or any(
-            not math.isfinite(value) or value <= 0.0 for value in dimensions
-        ):
-            raise ValueError(f"{name} must contain three finite positive values")
-        return dimensions
-
     @property
     def source_probabilities(self) -> tuple[float, ...]:
         """Return fixed-source group probabilities in ascending energy order."""
@@ -627,7 +698,7 @@ class Case:
 
     @property
     def source_definition(self) -> dict | None:
-        """Return the single physical source definition used by both solvers."""
+        """Return the physical source definition for generated transport inputs."""
         if self.run_mode != "fixed_source":
             return None
         if self.source_kind == "uniform_energy":
@@ -655,10 +726,12 @@ class Case:
 
     @property
     def geometry_type(self) -> str:
-        """Return the generated geometry implementation selected by material roles."""
-        if self.geometry is not None:
+        """Return the generated geometry implementation selected by the case."""
+        if isinstance(self.geometry, NestedBoxGeometry):
+            return "nested_box"
+        if isinstance(self.geometry, ConcentricGeometry):
             return "concentric"
-        return "homogeneous" if len(self.materials) == 1 else "moderated_target"
+        return "homogeneous"
 
     @property
     def total_histories(self) -> int:
@@ -702,7 +775,7 @@ def _material_records(case: Case) -> list[dict]:
 
 def _mgxs_domain_records(case: Case) -> list[dict]:
     """Serialize the declared domain order independently of OpenMC IDs/order."""
-    if case.geometry is not None:
+    if isinstance(case.geometry, ConcentricGeometry):
         return [
             {
                 "domain_type": "cell",
@@ -731,15 +804,29 @@ def _mgxs_domain_records(case: Case) -> list[dict]:
 def _geometry_record(case: Case) -> dict:
     if case.geometry is None:
         return {
-            "type": case.geometry_type,
+            "type": "homogeneous",
             "target_dimensions_cm": case.target_dimensions_cm,
-            "outer_dimensions_cm": (
-                case.outer_dimensions_cm or case.target_dimensions_cm
-            ),
+            "outer_dimensions_cm": case.target_dimensions_cm,
             "boundaries": dict(
                 zip(
                     ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"),
                     case.boundaries,
+                )
+            ),
+        }
+
+    if isinstance(case.geometry, NestedBoxGeometry):
+        geometry = case.geometry
+        return {
+            "type": "nested_box",
+            "target_material_logical_name": geometry.target.logical_name,
+            "moderator_material_logical_name": geometry.moderator.logical_name,
+            "target_dimensions_cm": geometry.target_dimensions_cm,
+            "outer_dimensions_cm": geometry.outer_dimensions_cm,
+            "boundaries": dict(
+                zip(
+                    ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"),
+                    geometry.boundaries,
                 )
             ),
         }
@@ -869,8 +956,8 @@ def prepare(
         raise ValueError(f"unknown solver {sorted(unknown)[0]!r}")
     if "opensn" in requested and "openmc" not in requested:
         raise ValueError("OpenSn preparation requires OpenMC")
-    if "opensn" in requested and case.geometry_type == "concentric":
-        raise ValueError("OpenSn does not support managed concentric geometry")
+    if "opensn" in requested and case.geometry_type != "homogeneous":
+        raise ValueError("OpenSn supports only homogeneous one-material cases")
 
     # Store and generate in dependency order even when the caller supplies an
     # unordered iterable such as a set.

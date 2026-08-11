@@ -333,7 +333,8 @@ def test_moderated_example_uses_lanl70_box_inside_box_geometry(tmp_path):
     generated = runpy.run_path(run / "openmc/model.py")
     model = generated["MODEL"]
 
-    assert generated["GEOMETRY"]["type"] == "moderated_target"
+    assert CASE.geometry is not None
+    assert generated["GEOMETRY"]["type"] == "nested_box"
     assert generated["ENERGY_BOUNDS_EV"].size == 71
 
     cells = list(model.geometry.get_all_cells().values())
@@ -360,6 +361,20 @@ def test_moderated_example_uses_lanl70_box_inside_box_geometry(tmp_path):
             (0.75, "reflective"),
         ]
 
+    source_box = model.settings.source[0].space
+    assert tuple(source_box.lower_left) == (-0.2, -0.2, -0.2)
+    assert tuple(source_box.upper_right) == (0.2, 0.2, 0.2)
+
+
+def test_opensn_input_contains_one_homogeneous_material(one_case, tmp_path):
+    text = (prepare(one_case, tmp_path / "homogeneous") / "opensn/input.py").read_text()
+    material_record = _literal_assignment(text, "MATERIAL")
+
+    assert material_record == {"logical_name": "one", "temperature_k": 294.0}
+    assert "MATERIALS" not in text
+    assert "domain_results" not in text
+    assert 'CONFIG["material"]' in text
+
 
 def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, tmp_path):
     run = prepare(one_case, tmp_path / "run")
@@ -371,19 +386,6 @@ def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, t
     assert "/home/" not in text
     assert ".cxs" not in text.lower()
     assert "MGXS_HDF5 = RUN_DIRECTORY / \"openmc\" / \"mgxs.h5\"" in text
-
-
-def test_two_material_domains_are_verified_independently(two_case, tmp_path):
-    """Input order cannot couple target and moderator in the verification solve."""
-    text = (prepare(two_case, tmp_path / "run") / "opensn/input.py").read_text()
-    materials = _literal_assignment(text, "MATERIALS")
-
-    assert [item["logical_name"] for item in materials] == ["moderator", "target"]
-    assert "opensn_block" not in text
-    assert "grid.SetUniformBlockID(0)" in text
-    assert 'xs_map=[{"block_ids": [0], "xs": cross_sections}]' in text
-    assert 'for material in CONFIG["materials"]' in text
-    assert 'str(MGXS_HDF5), logical_name, material["temperature_k"]' in text
 
 
 def test_fixed_opensn_verifier_is_independent_of_case_size_and_group_count(
@@ -657,13 +659,20 @@ def test_examples_show_the_complete_workflows():
 
     for name in ("prepare", "run_openmc", "load_mgxs", "solve_infinite_medium", "run_opensn"):
         assert name in be9
-    for name in ("uo2_target", "hdpe_moderator", "run_openmc", "run_opensn"):
+    for name in (
+        "NestedBoxGeometry",
+        "uo2_target",
+        "hdpe_moderator",
+        "run_openmc",
+    ):
         assert name in moderated
     assert "/home/ragusa/" not in be9 + moderated
     assert "OPENMC_CROSS_SECTIONS" in be9 + moderated
-    assert "OPENSN_CONSOLE" in be9 + moderated
+    assert "OPENSN_CONSOLE" in be9
+    assert "OPENSN_CONSOLE" not in moderated
     assert "run_path = prepare" in be9 + moderated
     assert "plot_mgxs" in be9 + moderated
+    assert 'solvers=("openmc",)' in moderated
     for name in (
         "run_mode=\"eigenvalue\"",
         "inactive_batches=120",

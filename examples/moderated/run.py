@@ -1,17 +1,21 @@
-"""Prepare and run the UO2/HDPE example with portable environment settings."""
+"""Prepare, run, and plot the UO2/HDPE example with OpenMC only."""
 
 import os
 from pathlib import Path
 
 from generate_mgxs import (
-    load_mgxs, load_openmc_result, plot_mgxs, prepare, run_openmc, run_opensn,
+    load_mgxs,
+    load_openmc_result,
+    plot_mgxs,
+    prepare,
+    run_openmc,
 )
 from case import CASE
 
 
 # --- Preparation: generates files but starts no solver --------------------
 # Generation is safe for bulk loops: this call writes files but executes no solver.
-run_path = prepare(CASE, Path("run/uo2_in_hdpe"))
+run_path = prepare(CASE, Path("run/uo2_in_hdpe"), solvers=("openmc",))
 print(f"Prepared independent run directory {run_path}")
 
 # --- OpenMC transport -----------------------------------------------------
@@ -39,12 +43,5 @@ moderator_xs = load_mgxs(run_path / "openmc/mgxs.h5", "hdpe_moderator", 294.0)
 plot_mgxs(target_xs, output_directory=run_path / "plots")
 plot_mgxs(moderator_xs, output_directory=run_path / "plots")
 
-
-# --- Independent OpenSn domain verification ------------------------------
-# UO2 and HDPE are each solved alone in the same fixed reflected 8-cell cube;
-# the verifier does not reconstruct or couple the OpenMC target/moderator mesh.
-opensn = run_opensn(run_path, executable=os.environ["OPENSN_CONSOLE"])
-
 # --- Result summary -------------------------------------------------------
 print(openmc_result.values.sum(), target_xs.logical_domain, moderator_xs.logical_domain)
-print({name: spectrum.values.sum() for name, spectrum in opensn.domain_spectra.items()})

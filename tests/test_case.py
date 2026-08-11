@@ -3,7 +3,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from generate_mgxs import Case, Material, energy_bounds, prepare, source_probabilities
+from generate_mgxs import (
+    Case,
+    Material,
+    NestedBoxGeometry,
+    energy_bounds,
+    prepare,
+    source_probabilities,
+)
 from conftest import material, tiny_case
 
 
@@ -241,13 +248,16 @@ def test_invalid_composition_identifiers_are_rejected(identifier):
 
 
 def test_one_and_two_material_mapping_are_physical(one_case, two_case):
-    """Physical roles, never tuple position, determine OpenMC geometry domains."""
+    """Nonhomogeneous topology is explicit rather than inferred from tuple order."""
     assert [x.logical_name for x in one_case.materials] == ["one"]
     assert one_case.geometry_type == "homogeneous"
 
-    # Supply moderator first: roles, not tuple positions, still establish geometry.
+    # Supply moderator first: the geometry, not tuple position, owns each role.
     assert [x.role for x in two_case.materials] == ["moderator", "target"]
-    assert two_case.geometry_type == "moderated_target"
+    assert isinstance(two_case.geometry, NestedBoxGeometry)
+    assert two_case.geometry_type == "nested_box"
+    assert two_case.geometry.target is two_case.materials[1]
+    assert two_case.geometry.moderator is two_case.materials[0]
 
 
 def test_material_constructor_has_no_solver_ids():
@@ -327,7 +337,7 @@ def test_case_run_modes_preserve_fixed_source_and_validate_eigenvalue():
         Case(**common, run_mode="eigenvalue", batches=3, inactive_batches=3)
     with pytest.raises(ValueError, match="inactive_batches"):
         Case(**common, run_mode="eigenvalue", inactive_batches=True)
-    with pytest.raises(ValueError, match="one homogeneous material"):
+    with pytest.raises(ValueError, match="explicit geometry"):
         Case(
             name="multi_eigenvalue",
             materials=(
@@ -342,15 +352,12 @@ def test_case_run_modes_preserve_fixed_source_and_validate_eigenvalue():
 
 
 def test_moderated_outer_dimensions_strictly_enclose_target():
+    target = material("target", "target")
+    moderator = material("mod", "moderator")
     with pytest.raises(ValueError, match="strictly exceed"):
-        Case(
-            name="touching",
-            materials=(
-                material("target", "target"),
-                material("mod", "moderator"),
-            ),
-            energy_groups=(1.0, 2.0),
-            source_kind="uniform_energy",
+        NestedBoxGeometry(
+            target=target,
+            moderator=moderator,
             target_dimensions_cm=(1.0, 1.0, 1.0),
             outer_dimensions_cm=(2.0, 1.0, 2.0),
         )
@@ -419,3 +426,15 @@ def test_hdpe_example_retains_the_benchmark_definition():
 
 def test_source_volume_is_target_volume(two_case):
     assert two_case.source_volume_cm3 == pytest.approx(0.064)
+
+
+def test_nested_box_preparation_is_openmc_only(two_case, tmp_path):
+    destination = tmp_path / "nested"
+
+    with pytest.raises(ValueError, match="homogeneous one-material"):
+        prepare(two_case, destination)
+
+    assert not destination.exists()
+    run = prepare(two_case, destination, solvers=("openmc",))
+    assert (run / "openmc/model.py").is_file()
+    assert not (run / "opensn").exists()

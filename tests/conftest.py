@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import pytest
 
-from generate_mgxs import Case, Material
+from generate_mgxs import Case, Material, NestedBoxGeometry
 
 
 def _runtime_path(environment_variable: str, *, default=None) -> Path:
@@ -41,23 +41,28 @@ def material(name="one", role="homogeneous"):
 
 def tiny_case(two_material=False, *, max_iterations=50):
     materials = (material(),)
-    outer = None
     target = (1.0, 1.0, 1.0)
+    geometry = None
     if two_material:
         materials = (
             material("moderator", "moderator"),
             material("target", "target"),
         )
-        outer = (1.0, 1.0, 1.0)
         target = (0.4, 0.4, 0.4)
+        geometry = NestedBoxGeometry(
+            target=materials[1],
+            moderator=materials[0],
+            target_dimensions_cm=target,
+            outer_dimensions_cm=(1.0, 1.0, 1.0),
+        )
     return Case(
         name="tiny_two" if two_material else "tiny_one",
         materials=materials,
         energy_groups=(1.0e-5, 1.0e6, 2.0e7),
         source_probabilities=(0.25, 0.75),
         source_kind="grouped",
-        target_dimensions_cm=target,
-        outer_dimensions_cm=outer,
+        target_dimensions_cm=target if geometry is None else None,
+        geometry=geometry,
         scattering_order=0,
         gmres_tolerance=1.0e-8,
         gmres_max_iterations=max_iterations,

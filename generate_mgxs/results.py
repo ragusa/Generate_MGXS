@@ -86,7 +86,6 @@ class OpenSnResult:
         iterations=None,
         residual=None,
         balance=None,
-        domain_spectra=None,
         *,
         run_mode="fixed_source",
         k_eff=None,
@@ -99,7 +98,6 @@ class OpenSnResult:
         self.iterations = None if iterations is None else int(iterations)
         self.residual = None if residual is None else float(residual)
         self.balance = None if balance is None else float(balance)
-        self.domain_spectra = domain_spectra
         self.run_mode = run_mode
         self.k_eff = None if k_eff is None else float(k_eff)
         self.k_eff_change = (

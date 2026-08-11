@@ -19,14 +19,13 @@ from .results import OpenSnResult, Spectrum
 
 def _write_opensn_input(case: Case, path: Path) -> None:
     """Render one deterministic, independently runnable OpenSn program."""
-    materials = [
-        {
-            "logical_name": item["logical_name"],
-            "temperature_k": item["temperature_k"],
-            "role": item["role"],
-        }
-        for item in _material_records(case)
-    ]
+    if case.geometry_type != "homogeneous":
+        raise ValueError("OpenSn supports only homogeneous one-material cases")
+    material_record = _material_records(case)[0]
+    material = {
+        "logical_name": material_record["logical_name"],
+        "temperature_k": material_record["temperature_k"],
+    }
 
     numerical = {
         "run_mode": case.run_mode,
@@ -47,7 +46,7 @@ def _write_opensn_input(case: Case, path: Path) -> None:
 
     replacements = {
         "__CASE_NAME__": repr(case.name),
-        "__MATERIALS__": pprint.pformat(materials, width=100, sort_dicts=False),
+        "__MATERIAL__": pprint.pformat(material, width=100, sort_dicts=False),
         "__PHYSICAL_SOURCE__": pprint.pformat(
             case.source_definition, width=100, sort_dicts=False
         ),
@@ -87,8 +86,8 @@ _PI_FINAL = re.compile(
 )
 
 
-def _single_convergence(output: str, tolerance: float, maximum_iterations: int):
-    """Validate one OpenSn solve from its persistent console output."""
+def _convergence(output: str, tolerance: float, maximum_iterations: int):
+    """Validate the homogeneous OpenSn solve from its persistent output."""
     # OpenSn/PETSc versions emit two known residual formats.  A small residual
     # alone is insufficient: the log must also state explicit convergence.
     matches = _ITERATION_RESIDUAL.findall(output) or _PETSC_RESIDUAL.findall(output)
@@ -121,39 +120,6 @@ def _single_convergence(output: str, tolerance: float, maximum_iterations: int):
         )
 
     return iterations, residual
-
-
-def _convergence(
-    output: str,
-    tolerance: float,
-    maximum_iterations: int,
-    domains=(),
-):
-    """Require explicit convergence for every independently solved domain."""
-    if not domains:
-        return _single_convergence(output, tolerance, maximum_iterations)
-
-    metrics = []
-    for domain in domains:
-        begin = f"GENERATE_MGXS_DOMAIN_BEGIN {domain}"
-        end = f"GENERATE_MGXS_DOMAIN_END {domain}"
-        begin_index = output.find(begin)
-        end_index = output.find(end, begin_index + len(begin))
-        if (
-            begin_index < 0
-            or end_index < 0
-            or output.count(begin) != 1
-            or output.count(end) != 1
-        ):
-            raise RuntimeError(
-                f"OpenSn convergence log is incomplete for domain {domain!r}"
-            )
-        segment = output[begin_index:end_index]
-        metrics.append(_single_convergence(segment, tolerance, maximum_iterations))
-
-    # The result-level summary is deliberately conservative; each domain has
-    # already passed the same explicit status, residual, and iteration checks.
-    return max(item[0] for item in metrics), max(item[1] for item in metrics)
 
 
 def _eigenvalue_convergence(
@@ -287,9 +253,6 @@ def run_opensn(
         document = json.loads(result_path.read_text())
         solver = document["solver"]
         run_mode = document.get("run_mode", "fixed_source")
-        domains = document.get("domains", {})
-        if not isinstance(domains, dict):
-            raise TypeError("domains must be an object")
         if run_mode == "eigenvalue":
             tolerance = float(solver["k_tolerance"])
             maximum = int(solver["maximum_iterations"])
@@ -323,9 +286,7 @@ def run_opensn(
     else:
         # A low residual is accepted only when the log also reports explicit
         # convergence within the configured iteration limit.
-        iterations, residual = _convergence(
-            output, tolerance, maximum, tuple(domains)
-        )
+        iterations, residual = _convergence(output, tolerance, maximum)
         solver.update(converged=True, iterations=iterations, residual=residual)
 
     result_path.write_text(
@@ -359,17 +320,6 @@ def load_opensn_result(path) -> OpenSnResult:
         np.asarray(document["flux"], dtype=float),
         logical_domain=document.get("logical_domain"),
     )
-    domains = None
-    if "domains" in document:
-        domains = {
-            name: Spectrum(
-                bounds,
-                np.asarray(record["flux"], dtype=float),
-                logical_domain=name,
-            )
-            for name, record in document["domains"].items()
-        }
-
     balance = float(solver["balance"]) if solver.get("balance") is not None else None
     if run_mode == "eigenvalue":
         required = ("k_eff", "k_eff_change", "power_iterations", "sweeps")
@@ -385,7 +335,6 @@ def load_opensn_result(path) -> OpenSnResult:
             primary,
             True,
             balance=balance,
-            domain_spectra=domains,
             run_mode="eigenvalue",
             k_eff=solver["k_eff"],
             k_eff_change=solver["k_eff_change"],
@@ -403,5 +352,4 @@ def load_opensn_result(path) -> OpenSnResult:
         int(iterations),
         float(residual),
         balance,
-        domains,
     )

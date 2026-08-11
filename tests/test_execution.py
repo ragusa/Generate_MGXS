@@ -444,23 +444,6 @@ def test_opensn_success_requires_parsed_convergence(one_case, tmp_path):
     assert result.residual == pytest.approx(1e-9)
 
 
-def test_opensn_requires_each_independent_domain_to_converge():
-    """One successful material cannot conceal another domain's failed solve."""
-    output = (
-        "GENERATE_MGXS_DOMAIN_BEGIN target\n"
-        "Linear Iteration 3 Residual 1.0e-10 status = converged\n"
-        "GENERATE_MGXS_DOMAIN_END target\n"
-        "GENERATE_MGXS_DOMAIN_BEGIN moderator\n"
-        "Linear Iteration 50 Residual 2.0e-7 status = not converged\n"
-        "GENERATE_MGXS_DOMAIN_END moderator\n"
-    )
-
-    with pytest.raises(RuntimeError, match="did not converge"):
-        # JSON key sorting may differ from execution order; domain validation
-        # must remain order-independent.
-        _convergence(output, 1.0e-8, 50, ("moderator", "target"))
-
-
 def test_opensn_eigenvalue_convergence_requires_exact_final_summary():
     output = (
         "PI iteration = 8, k_eff = 1.0123457, k_eff_change = 8.00000e-09, "
@@ -688,23 +671,6 @@ def test_generated_one_material_opensn_two_rank(one_case, tmp_path):
     )
 
     assert result.converged
-
-
-@pytest.mark.opensn
-@pytest.mark.skipif(not OPENSN.is_file(), reason="supplied OpenSn console is unavailable")
-def test_generated_two_material_opensn_executes(two_case, tmp_path):
-    run = prepare(two_case, tmp_path / "two")
-    write_tiny_mgxs(run / "openmc/mgxs.h5", ("moderator", "target"))
-
-    result = run_opensn(run, executable=OPENSN, timeout=60)
-
-    assert set(result.domain_spectra) == {"target", "moderator"}
-
-    document = json.loads((run / "opensn/opensn_result.json").read_text())
-    assert document["domains"]["target"]["block"] == 0
-    assert document["domains"]["target"]["volume_cm3"] == pytest.approx(8.0)
-    assert document["domains"]["moderator"]["block"] == 0
-    assert document["domains"]["moderator"]["volume_cm3"] == pytest.approx(8.0)
 
 
 @pytest.mark.opensn

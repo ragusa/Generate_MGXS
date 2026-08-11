@@ -1,6 +1,11 @@
-"""A fixed-source UO2 target embedded in an HDPE moderator."""
+"""A fixed-source UO2 target embedded in an HDPE moderator.
 
-from generate_mgxs import Case, Material, energy_bounds
+This benchmark configuration is subcritical, so a fixed-source calculation is
+appropriate. Users adapting the materials or geometry are responsible for
+determining whether fixed-source or eigenvalue mode is physically appropriate.
+"""
+
+from generate_mgxs import Case, Material, NestedBoxGeometry, energy_bounds
 
 
 BOUNDS_EV = energy_bounds("LANL70")
@@ -33,24 +38,31 @@ UO2 = Material(
 )
 
 
+# --- Explicit target box inside moderator box -----------------------------
+GEOMETRY = NestedBoxGeometry(
+    target=UO2,
+    moderator=HDPE,
+    target_dimensions_cm=(0.4, 0.4, 0.4),
+    outer_dimensions_cm=(1.5, 1.5, 1.5),
+    boundaries=("reflective",) * 6,
+)
+
+
 # --- Complete moderated case ---------------------------------------------
 CASE = Case(
     name="uo2_in_hdpe",
-    materials=(HDPE, UO2),  # ordering is deliberately unrelated to block assignment
+    # Material ordering is deliberately unrelated to geometric assignment.
+    materials=(HDPE, UO2),
     # LANL70 is custom and therefore remains an explicit ascending boundary tuple.
     energy_groups=BOUNDS_EV,
-    # The continuous OpenMC source and grouped OpenSn source share these parameters.
+    # OpenMC samples this physical Watt source inside the target box.
     source_kind="watt",
     watt_a_mev=0.988,
     watt_b_per_mev=2.249,
-    target_dimensions_cm=(0.4, 0.4, 0.4),
-    outer_dimensions_cm=(1.5, 1.5, 1.5),
+    geometry=GEOMETRY,
     # The seed's 10,000,000 total histories are distributed over 40 batches.
     particles_per_batch=250_000,
     batches=40,
-    # OpenMC preserves P0--P3 MGXS; the independent OpenSn verifier uses P0.
+    # OpenMC preserves P0--P3 MGXS for both material domains.
     scattering_order=3,
-    gmres_tolerance=1.0e-9,
-    gmres_max_iterations=300,
-    gmres_restart=100,
 )

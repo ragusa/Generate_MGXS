@@ -23,12 +23,13 @@ MATERIALS = __MATERIALS__
 # authority for MGXS domains and their exported XSdata names.
 MGXS_DOMAINS = __MGXS_DOMAINS__
 
-# Geometry dimensions are full lengths in cm.  Material roles, rather than
-# caller ordering, determine target and moderator regions.
+# Geometry dimensions are full lengths in cm. The explicit geometry, rather
+# than material tuple ordering, determines target and moderator regions.
 GEOMETRY = __GEOMETRY__
 
 # Fixed-source cases use one physical authority for continuous OpenMC sampling
-# and derived OpenSn group probabilities. Eigenvalue cases store None here.
+# and grouped spectra. Homogeneous OpenSn inputs reuse it; eigenvalue cases use
+# None because their starting source has no prescribed energy distribution.
 PHYSICAL_SOURCE = __PHYSICAL_SOURCE__
 SOURCE_BOUNDS_CM = __SOURCE_BOUNDS__
 
@@ -88,8 +89,8 @@ def source_probabilities():
     elif kind == "watt":
         bounds_mev = ENERGY_BOUNDS_EV / 1.0e6
 
-        # Match case preparation exactly so OpenMC and OpenSn derive grouped
-        # probabilities from the same physical Watt parameters.
+        # Match case preparation exactly. Homogeneous OpenSn verification uses
+        # the same physical Watt parameters when it is requested.
         nodes, weights = np.polynomial.legendre.leggauss(64)
         masses = []
         for low, high in zip(bounds_mev[:-1], bounds_mev[1:]):
@@ -156,13 +157,13 @@ def build_model():
     # --- Geometry ----------------------------------------------------------
     cell_by_name = {}
 
-    if CONFIG["geometry_type"] in {"homogeneous", "moderated_target"}:
-        target = next(
-            item
-            for item in CONFIG["materials"]
-            if item["role"] in ("homogeneous", "target")
+    if CONFIG["geometry_type"] in {"homogeneous", "nested_box"}:
+        target_logical_name = (
+            CONFIG["materials"][0]["logical_name"]
+            if CONFIG["geometry_type"] == "homogeneous"
+            else GEOMETRY["target_material_logical_name"]
         )
-        target_material = material_by_domain[target["logical_name"]]
+        target_material = material_by_domain[target_logical_name]
         tdx, tdy, tdz = GEOMETRY["target_dimensions_cm"]
 
     if CONFIG["geometry_type"] == "homogeneous":
@@ -177,7 +178,7 @@ def build_model():
         xmin, xmax, ymin, ymax, zmin, zmax = surfaces
         target_region = +xmin & -xmax & +ymin & -ymax & +zmin & -zmax
         cells = [openmc.Cell(fill=target_material, region=target_region)]
-    elif CONFIG["geometry_type"] == "moderated_target":
+    elif CONFIG["geometry_type"] == "nested_box":
         tx0, tx1 = openmc.XPlane(-tdx / 2), openmc.XPlane(+tdx / 2)
         ty0, ty1 = openmc.YPlane(-tdy / 2), openmc.YPlane(+tdy / 2)
         tz0, tz1 = openmc.ZPlane(-tdz / 2), openmc.ZPlane(+tdz / 2)
@@ -190,13 +191,12 @@ def build_model():
         oz0 = openmc.ZPlane(-odz / 2, boundary_type=GEOMETRY["boundaries"]["zmin"])
         oz1 = openmc.ZPlane(+odz / 2, boundary_type=GEOMETRY["boundaries"]["zmax"])
         outer_region = +ox0 & -ox1 & +oy0 & -oy1 & +oz0 & -oz1
-        moderator = next(
-            item for item in CONFIG["materials"] if item["role"] == "moderator"
-        )
         cells = [
             openmc.Cell(fill=target_material, region=target_region),
             openmc.Cell(
-                fill=material_by_domain[moderator["logical_name"]],
+                fill=material_by_domain[
+                    GEOMETRY["moderator_material_logical_name"]
+                ],
                 region=outer_region & ~target_region,
             ),
         ]

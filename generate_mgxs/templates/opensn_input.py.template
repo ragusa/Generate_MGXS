@@ -13,7 +13,7 @@ import numpy as np
 
 # --- Human-readable case definition ---------------------------------------
 CASE_NAME = __CASE_NAME__
-MATERIALS = __MATERIALS__
+MATERIAL = __MATERIAL__
 
 # Fixed-source cases share this authority with OpenMC; eigenvalue cases use None.
 PHYSICAL_SOURCE = __PHYSICAL_SOURCE__
@@ -44,11 +44,9 @@ NUM_GROUPS = ENERGY_BOUNDS_EV_ASCENDING.size - 1
 
 CONFIG = {
     "case_name": CASE_NAME,
-    "materials": MATERIALS,
+    "material": MATERIAL,
     **OPENSN_NUMERICAL_SETTINGS,
 }
-if CONFIG["run_mode"] == "eigenvalue" and len(CONFIG["materials"]) != 1:
-    raise ValueError("OpenSn eigenvalue verification requires one material domain")
 
 
 def source_probabilities():
@@ -99,8 +97,8 @@ else:
 
 
 # --- Fixed verification mesh ----------------------------------------------
-# OpenSn verifies each HDF5 material independently; it never reconstructs the
-# OpenMC target/moderator geometry. Three nodes per axis give exactly 8 cells.
+# OpenSn verifies one homogeneous HDF5 material domain. Three nodes per axis
+# give exactly 8 cells.
 half_width = VERIFICATION["cube_side_cm"] / 2.0
 axis_nodes = np.linspace(
     -half_width,
@@ -179,132 +177,110 @@ def volume_integral(field, volume):
     return float(interpolation.GetValue())
 
 
-# --- Independent material verification solves -----------------------------
-# Every OpenMC HDF5 material domain is put into the same block-zero cube and
-# solved independently. This verifies each material against the direct
-# infinite-medium equation without coupling it to another material or geometry.
+# --- Homogeneous material verification solve ------------------------------
 if not MGXS_HDF5.is_file():
     raise FileNotFoundError(f"OpenMC MGXS HDF5 is missing: {MGXS_HDF5}")
 
-domain_results = {}
-eigenvalue_metrics = None
-for material in CONFIG["materials"]:
-    logical_name = material["logical_name"]
-    cross_sections = MultiGroupXS()
-    cross_sections.LoadFromOpenMC(
-        str(MGXS_HDF5), logical_name, material["temperature_k"]
-    )
-
-    quadrature = GLCProductQuadrature3DXYZ(
-        n_polar=VERIFICATION["n_polar"],
-        n_azimuthal=VERIFICATION["n_azimuthal"],
-        scattering_order=VERIFICATION["scattering_order"],
-    )
-    groupsets = [{
-        "groups_from_to": (0, NUM_GROUPS - 1),
-        "angular_quadrature": quadrature,
-        "inner_linear_method": "petsc_gmres",
-        "l_abs_tol": CONFIG["gmres_tolerance"],
-        "l_max_its": CONFIG["gmres_max_iterations"],
-        "gmres_restart_interval": CONFIG["gmres_restart"],
-    }]
-    problem_options = {"save_angular_flux": False}
-    if CONFIG["run_mode"] == "eigenvalue":
-        problem_options.update({
-            "use_precursors": False,
-            "verbose_inner_iterations": False,
-            "verbose_outer_iterations": True,
-        })
-    problem = DiscreteOrdinatesProblem(
-        mesh=grid,
-        num_groups=NUM_GROUPS,
-        groupsets=groupsets,
-        xs_map=[{"block_ids": [0], "xs": cross_sections}],
-        boundary_conditions=REFLECTING_BOUNDARIES,
-        options=problem_options,
-    )
-    if CONFIG["run_mode"] == "fixed_source":
-        problem.SetVolumetricSources(
-            volumetric_sources=[
-                VolumetricSource(
-                    block_ids=[0],
-                    group_strength=source_strength_high_to_low.tolist(),
-                )
-            ]
-        )
-
-        # Delimit each solve so the runner can validate every material domain.
-        if globals().get("rank", 0) == 0:
-            print(f"GENERATE_MGXS_DOMAIN_BEGIN {logical_name}", flush=True)
-        solver = SteadyStateSourceSolver(problem=problem, compute_balance=True)
-    else:
-        # OpenSn initializes the power-iteration scalar flux. No external
-        # source is introduced into this homogeneous reflected eigenproblem.
-        solver = PowerIterationKEigenSolver(
-            problem=problem,
-            max_iters=CONFIG["keigen_max_iterations"],
-            k_tol=CONFIG["keigen_tolerance"],
-            compute_balance=True,
-        )
-    solver.Initialize()
-    solver.Execute()
-    if CONFIG["run_mode"] == "fixed_source" and globals().get("rank", 0) == 0:
-        print(f"GENERATE_MGXS_DOMAIN_END {logical_name}", flush=True)
-
-    balance_values = {
-        name: float(value) for name, value in solver.ComputeBalanceTable().items()
-    }
-    fields_high_to_low = problem.GetScalarFluxFieldFunction()
-    if len(fields_high_to_low) != NUM_GROUPS:
-        raise ValueError("OpenSn did not expose one scalar-flux field per group")
-
-    flux_high_to_low = np.asarray([
-        volume_integral(field, verification_volume) for field in fields_high_to_low
-    ])
-    # OpenSn group zero is highest energy; serialize package-facing values in
-    # ascending physical-energy order without changing the HDF5 group contract.
-    flux_ascending = flux_high_to_low[::-1]
-    if CONFIG["run_mode"] == "eigenvalue":
-        negative_tolerance = 1.0e-13 * max(
-            1.0, float(np.max(np.abs(flux_ascending)))
-        )
-        if np.any(flux_ascending < -negative_tolerance):
-            raise ValueError("OpenSn eigenvalue spectrum contains negative flux")
-        flux_ascending = np.where(flux_ascending < 0.0, 0.0, flux_ascending)
-        flux_sum = float(flux_ascending.sum())
-        if not math.isfinite(flux_sum) or flux_sum <= 0.0:
-            raise ValueError("OpenSn eigenvalue spectrum cannot be normalized")
-        flux_ascending = flux_ascending / flux_sum
-        eigenvalue_metrics = {
-            "k_eff": float(solver.GetEigenvalue()),
-            "power_iterations": int(solver.GetNumPowerIterations()),
-            "sweeps": int(solver.GetNumSweeps()),
-        }
-    balance = balance_values.get(
-        "balance",
-        balance_values.get("production_rate", 0.0)
-        + balance_values.get("inflow_rate", 0.0)
-        - balance_values.get("absorption_rate", 0.0)
-        - balance_values.get("outflow_rate", 0.0),
-    )
-    domain_results[logical_name] = {
-        "block": 0,
-        "volume_cm3": VERIFICATION["volume_cm3"],
-        "flux": flux_ascending.tolist(),
-        "balance": float(balance),
-    }
-
-primary = next(
-    item["logical_name"] for item in CONFIG["materials"]
-    if item["role"] in ("homogeneous", "target")
+logical_name = CONFIG["material"]["logical_name"]
+cross_sections = MultiGroupXS()
+cross_sections.LoadFromOpenMC(
+    str(MGXS_HDF5), logical_name, CONFIG["material"]["temperature_k"]
 )
+
+quadrature = GLCProductQuadrature3DXYZ(
+    n_polar=VERIFICATION["n_polar"],
+    n_azimuthal=VERIFICATION["n_azimuthal"],
+    scattering_order=VERIFICATION["scattering_order"],
+)
+groupsets = [{
+    "groups_from_to": (0, NUM_GROUPS - 1),
+    "angular_quadrature": quadrature,
+    "inner_linear_method": "petsc_gmres",
+    "l_abs_tol": CONFIG["gmres_tolerance"],
+    "l_max_its": CONFIG["gmres_max_iterations"],
+    "gmres_restart_interval": CONFIG["gmres_restart"],
+}]
+problem_options = {"save_angular_flux": False}
+if CONFIG["run_mode"] == "eigenvalue":
+    problem_options.update({
+        "use_precursors": False,
+        "verbose_inner_iterations": False,
+        "verbose_outer_iterations": True,
+    })
+problem = DiscreteOrdinatesProblem(
+    mesh=grid,
+    num_groups=NUM_GROUPS,
+    groupsets=groupsets,
+    xs_map=[{"block_ids": [0], "xs": cross_sections}],
+    boundary_conditions=REFLECTING_BOUNDARIES,
+    options=problem_options,
+)
+if CONFIG["run_mode"] == "fixed_source":
+    problem.SetVolumetricSources(
+        volumetric_sources=[
+            VolumetricSource(
+                block_ids=[0],
+                group_strength=source_strength_high_to_low.tolist(),
+            )
+        ]
+    )
+    solver = SteadyStateSourceSolver(problem=problem, compute_balance=True)
+else:
+    # OpenSn initializes the power-iteration scalar flux. No external source is
+    # introduced into this homogeneous reflected eigenproblem.
+    solver = PowerIterationKEigenSolver(
+        problem=problem,
+        max_iters=CONFIG["keigen_max_iterations"],
+        k_tol=CONFIG["keigen_tolerance"],
+        compute_balance=True,
+    )
+solver.Initialize()
+solver.Execute()
+
+balance_values = {
+    name: float(value) for name, value in solver.ComputeBalanceTable().items()
+}
+fields_high_to_low = problem.GetScalarFluxFieldFunction()
+if len(fields_high_to_low) != NUM_GROUPS:
+    raise ValueError("OpenSn did not expose one scalar-flux field per group")
+
+flux_high_to_low = np.asarray([
+    volume_integral(field, verification_volume) for field in fields_high_to_low
+])
+# OpenSn group zero is highest energy; serialize package-facing values in
+# ascending physical-energy order without changing the HDF5 group contract.
+flux_ascending = flux_high_to_low[::-1]
+eigenvalue_metrics = None
+if CONFIG["run_mode"] == "eigenvalue":
+    negative_tolerance = 1.0e-13 * max(
+        1.0, float(np.max(np.abs(flux_ascending)))
+    )
+    if np.any(flux_ascending < -negative_tolerance):
+        raise ValueError("OpenSn eigenvalue spectrum contains negative flux")
+    flux_ascending = np.where(flux_ascending < 0.0, 0.0, flux_ascending)
+    flux_sum = float(flux_ascending.sum())
+    if not math.isfinite(flux_sum) or flux_sum <= 0.0:
+        raise ValueError("OpenSn eigenvalue spectrum cannot be normalized")
+    flux_ascending = flux_ascending / flux_sum
+    eigenvalue_metrics = {
+        "k_eff": float(solver.GetEigenvalue()),
+        "power_iterations": int(solver.GetNumPowerIterations()),
+        "sweeps": int(solver.GetNumSweeps()),
+    }
+balance = balance_values.get(
+    "balance",
+    balance_values.get("production_rate", 0.0)
+    + balance_values.get("inflow_rate", 0.0)
+    - balance_values.get("absorption_rate", 0.0)
+    - balance_values.get("outflow_rate", 0.0),
+)
+
 if CONFIG["run_mode"] == "eigenvalue":
     result = {
         "run_mode": "eigenvalue",
         "energy_bounds": ENERGY_BOUNDS_EV_ASCENDING.tolist(),
-        "flux": domain_results[primary]["flux"],
-        "logical_domain": primary,
-        "domains": domain_results,
+        "flux": flux_ascending.tolist(),
+        "logical_domain": logical_name,
         "verification": VERIFICATION,
         "solver": {
             "converged": None,
@@ -312,15 +288,14 @@ if CONFIG["run_mode"] == "eigenvalue":
             "k_eff_change": None,
             "k_tolerance": CONFIG["keigen_tolerance"],
             "maximum_iterations": CONFIG["keigen_max_iterations"],
-            "balance": domain_results[primary]["balance"],
+            "balance": float(balance),
         },
     }
 else:
     result = {
         "energy_bounds": ENERGY_BOUNDS_EV_ASCENDING.tolist(),
-        "flux": domain_results[primary]["flux"],
-        "logical_domain": primary,
-        "domains": domain_results,
+        "flux": flux_ascending.tolist(),
+        "logical_domain": logical_name,
         "verification": VERIFICATION,
         "solver": {
             "converged": None,
@@ -328,7 +303,7 @@ else:
             "residual": None,
             "tolerance": CONFIG["gmres_tolerance"],
             "maximum_iterations": CONFIG["gmres_max_iterations"],
-            "balance": domain_results[primary]["balance"],
+            "balance": float(balance),
         },
     }
 
