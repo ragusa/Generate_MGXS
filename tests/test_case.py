@@ -13,7 +13,9 @@ def test_named_group_structures_are_ascending():
 
     assert len(energy_bounds("WIMS69")) == 70
     assert len(energy_bounds("LANL30")) == 31
+    assert len(energy_bounds("LANL70")) == 71
     assert np.all(np.diff(energy_bounds("WIMS69")) > 0.0)
+    assert np.all(np.diff(energy_bounds("LANL70")) > 0.0)
     np.testing.assert_array_equal(
         energy_bounds("SHEM-361"),
         GROUP_STRUCTURES["SHEM-361"],
@@ -367,6 +369,10 @@ def test_history_semantics_match_reference_case_definitions():
         40,
         250_000,
         10_000_000,
+    )
+    np.testing.assert_array_equal(
+        moderated.energy_bounds_ev,
+        energy_bounds("LANL70"),
     )
 
 

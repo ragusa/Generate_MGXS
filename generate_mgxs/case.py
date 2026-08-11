@@ -120,6 +120,7 @@ def energy_bounds(name: str) -> tuple[float, ...]:
     custom = {
         "WIMS69": _WIMS69_MEV,
         "LANL30": _LANL30_MEV,
+        "LANL70": _LANL70_MEV,
     }
     try:
         # If OpenMC acquires a structure with the same spelling as a legacy

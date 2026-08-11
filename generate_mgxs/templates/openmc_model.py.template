@@ -268,20 +268,13 @@ def build_model():
         # An eigenvalue solve needs only a spatial starting population. OpenMC
         # determines its energy distribution through fission generations.
         source = openmc.IndependentSource(
-            space=openmc.stats.Box(
-                source_low,
-                source_high,
-                only_fissionable=True,
-            )
+            space=openmc.stats.Box(source_low, source_high),
+            constraints={"fissionable": True},
         )
         settings.source = source
     else:
         source = openmc.IndependentSource()
-        source.space = openmc.stats.Box(
-            source_low,
-            source_high,
-            only_fissionable=False,
-        )
+        source.space = openmc.stats.Box(source_low, source_high)
         source.angle = openmc.stats.Isotropic()
 
         # Continuous-energy sampling is built directly from PHYSICAL_SOURCE.

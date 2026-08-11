@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import sys
 
 import h5py
 import numpy as np
@@ -10,11 +12,19 @@ import pytest
 from generate_mgxs import Case, Material
 
 
-OPENMC_PYTHON = Path("/home/ragusa/miniforge3/envs/openmc-env/bin/python")
-OPENMC_DATA = Path("/home/ragusa/xs/endfb-viii.0-hdf5/cross_sections.xml")
-OPENSN = Path("/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-console")
-OPENSN_MPI = Path("/home/ragusa/opt/opensn/commit-b39f7be8a215/bin/opensn-mpiexec")
-OPENSN_FISSION_MGXS = Path("/home/ragusa/repo/opensn/test/assets/xs/u235_84g.h5")
+def _runtime_path(environment_variable: str, *, default=None) -> Path:
+    """Return an optional test runtime path without embedding a local layout."""
+    value = os.environ.get(environment_variable, default)
+    if value:
+        return Path(value).expanduser()
+    return Path("__generate_mgxs_runtime_not_configured__")
+
+
+OPENMC_PYTHON = _runtime_path("OPENMC_PYTHON", default=sys.executable)
+OPENMC_DATA = _runtime_path("OPENMC_CROSS_SECTIONS")
+OPENSN = _runtime_path("OPENSN_CONSOLE")
+OPENSN_MPI = _runtime_path("OPENSN_MPIEXEC")
+OPENSN_FISSION_MGXS = _runtime_path("OPENSN_FISSION_MGXS")
 EVIDENCE = Path(__file__).parent / "data"
 
 

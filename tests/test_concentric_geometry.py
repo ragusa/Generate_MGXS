@@ -334,7 +334,7 @@ def test_pu9_hdpe_native_openmc_geometry_and_eigenvalue_settings(tmp_path):
         10,
         5_000_000,
     )
-    assert model.settings.source[0].space.only_fissionable is True
+    assert model.settings.source[0].constraints["fissionable"] is True
     assert tuple(model.settings.source[0].space.lower_left) == (-2.0, -2.0, -2.0)
     assert tuple(model.settings.source[0].space.upper_right) == (2.0, 2.0, 2.0)
 

@@ -3,7 +3,7 @@
 from generate_mgxs import Case, Material, energy_bounds
 
 
-BOUNDS_EV = energy_bounds("LANL30")
+BOUNDS_EV = energy_bounds("LANL70")
 
 
 # --- Moderator material ---------------------------------------------------
@@ -37,7 +37,7 @@ UO2 = Material(
 CASE = Case(
     name="uo2_in_hdpe",
     materials=(HDPE, UO2),  # ordering is deliberately unrelated to block assignment
-    # LANL30 is custom and therefore remains an explicit ascending boundary tuple.
+    # LANL70 is custom and therefore remains an explicit ascending boundary tuple.
     energy_groups=BOUNDS_EV,
     # The continuous OpenMC source and grouped OpenSn source share these parameters.
     source_kind="watt",

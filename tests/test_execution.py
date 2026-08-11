@@ -26,6 +26,7 @@ from conftest import (
     OPENSN,
     OPENSN_FISSION_MGXS,
     OPENSN_MPI,
+    _runtime_path,
     material,
     write_result,
     write_tiny_mgxs,
@@ -47,6 +48,18 @@ def eigenvalue_case(*, energy_groups=(1.0e-5, 1.0e6, 2.0e7)):
         keigen_tolerance=1.0e-8,
         keigen_max_iterations=50,
     )
+
+
+def test_execution_runtime_paths_are_environment_configurable(monkeypatch, tmp_path):
+    configured = tmp_path / "runtime"
+    monkeypatch.setenv("GENERATE_MGXS_TEST_RUNTIME", str(configured))
+
+    assert _runtime_path("GENERATE_MGXS_TEST_RUNTIME") == configured
+
+    monkeypatch.delenv("GENERATE_MGXS_TEST_RUNTIME")
+    assert _runtime_path(
+        "GENERATE_MGXS_TEST_RUNTIME", default=configured
+    ) == configured
 
 
 def executable_script(path: Path, body: str):

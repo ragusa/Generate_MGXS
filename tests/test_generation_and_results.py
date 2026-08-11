@@ -297,7 +297,8 @@ def test_flattop_eigenvalue_generation_preserves_its_scientific_definition(
     assert geometry["target_dimensions_cm"] == (2.0, 2.0, 2.0)
     assert set(geometry["boundaries"].values()) == {"reflective"}
     assert _literal_assignment(model_text, "PHYSICAL_SOURCE") is None
-    assert 'only_fissionable=True' in model_text
+    assert 'constraints={"fissionable": True}' in model_text
+    assert "only_fissionable" not in model_text
     assert 'PowerIterationKEigenSolver' in opensn_text
     assert '"scattering_order": 0' in opensn_text
     assert '"angular_directions": 8' in opensn_text
@@ -315,11 +316,49 @@ def test_flattop_eigenvalue_generation_preserves_its_scientific_definition(
         20_000,
     )
     assert settings.temperature["method"] == "interpolation"
-    assert initial_source.space.only_fissionable is True
+    assert initial_source.constraints["fissionable"] is True
     assert initial_source.energy is None
     assert library.scatter_format == "legendre"
     assert library.legendre_order == 7
     assert library.correction is None
+
+
+def test_moderated_example_uses_lanl70_box_inside_box_geometry(tmp_path):
+    """The UO2 target is an inner box surrounded by the outer HDPE box."""
+    import runpy
+
+    from examples.moderated.case import CASE
+
+    run = prepare(CASE, tmp_path / "moderated", solvers=("openmc",))
+    generated = runpy.run_path(run / "openmc/model.py")
+    model = generated["MODEL"]
+
+    assert generated["GEOMETRY"]["type"] == "moderated_target"
+    assert generated["ENERGY_BOUNDS_EV"].size == 71
+
+    cells = list(model.geometry.get_all_cells().values())
+    assert {cell.fill.name for cell in cells} == {"UO2", "HDPE moderator"}
+
+    surfaces = list(model.geometry.get_all_surfaces().values())
+    for surface_type, coordinate in (
+        ("XPlane", "x0"),
+        ("YPlane", "y0"),
+        ("ZPlane", "z0"),
+    ):
+        planes = sorted(
+            (
+                (getattr(surface, coordinate), surface.boundary_type)
+                for surface in surfaces
+                if surface.__class__.__name__ == surface_type
+            ),
+            key=lambda item: item[0],
+        )
+        assert planes == [
+            (-0.75, "reflective"),
+            (-0.2, "transmission"),
+            (0.2, "transmission"),
+            (0.75, "reflective"),
+        ]
 
 
 def test_generated_inputs_are_run_relative_and_have_no_ascii_handoff(one_case, tmp_path):
