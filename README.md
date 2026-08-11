@@ -1,29 +1,97 @@
 # Generate MGXS
 
 `generate_mgxs` is a small, explicit bridge between OpenMC and OpenSn for
-managed multigroup calculations. It supports fixed-source and k-eigenvalue
-operation, homogeneous OpenMC/OpenSn verification cases, and a deliberately
-limited OpenMC-only concentric-cylinder geometry. Python-facing energy arrays
-always run from low to high physical energy. OpenMC MGXS arrays and OpenSn group
-numbering are converted at their boundaries only.
+managed multigroup calculations. It prepares readable solver inputs, runs the
+solvers only when explicitly requested, loads their compact results, provides
+homogeneous direct checks, and plots spectra and multigroup cross sections.
+
+The package supports:
+
+- fixed-source and k-eigenvalue OpenMC calculations;
+- homogeneous one-material and target/moderator box models;
+- an intentionally limited OpenMC-only concentric-cylinder geometry;
+- OpenSn homogeneous verification calculations;
+- direct homogeneous fixed-source and rank-one eigenvalue checks; and
+- per-domain MGXS and spectrum plotting.
+
+Python-facing energy arrays always run from low to high physical energy.
+OpenMC MGXS arrays and OpenSn group numbering are converted only at their
+boundaries. Scattering data use `scatter[moment, g_in, g_out]` ordering.
+
+## Requirements
+
+The Python package requires Python 3.10 or newer, NumPy, and h5py. Install the
+repository in editable mode with:
+
+```bash
+python -m pip install -e .
+```
+
+Plotting and test dependencies are optional:
+
+```bash
+python -m pip install -e ".[plot]"
+python -m pip install -e ".[plot,test]"
+```
+
+OpenMC is an external scientific runtime rather than a package dependency.
+Resolving a named OpenMC energy-group structure and executing a generated
+OpenMC model need an OpenMC-capable Python environment. Preparing a case with
+explicit energy boundaries is deterministic file generation and does not start
+or import OpenMC. OpenMC transport also needs a compatible
+`cross_sections.xml` nuclear-data library.
+
+OpenSn is likewise external. Generated OpenSn inputs must be run with an
+installed `opensn-console` wrapper. OpenMC and OpenSn are separate processes;
+do not import OpenMC and `pyopensn` into the same Python process or activate an
+OpenMC environment around an OpenSn process that supplies its own runtime.
+
+## Define and prepare a case
 
 Define a `Case`, then prepare an independent run directory:
 
 ```python
 from pathlib import Path
 
-from generate_mgxs import prepare
-from my_case import CASE
+from generate_mgxs import Case, Material, prepare
 
-run_path = prepare(CASE, Path("results/material_001"))
+material = Material(
+    "be9",
+    "Be-9",
+    1.85,
+    (("Be9", 1.0),),
+)
+case = Case(
+    name="be9",
+    materials=(material,),
+    energy_groups=(1.0e-5, 1.0e6, 2.0e7),
+    target_dimensions_cm=(2.0, 2.0, 2.0),
+    source_kind="uniform_energy",
+)
+
+run_path = prepare(case, Path("results/be9"))
 ```
 
-By default, `prepare()` writes `_metadata/run.json`, `openmc/model.py`, and
-`opensn/input.py`; it never starts a subprocess. This makes a plain generation
-loop sufficient for one or one hundred cases, with no campaign state.
+`prepare()` never starts a subprocess. By default it writes independent OpenMC
+and OpenSn inputs plus provenance metadata. OpenMC-only preparation is
+explicit:
 
-Energy groups may be a canonical OpenMC structure name or explicit custom
-boundaries:
+```python
+run_path = prepare(
+    case,
+    Path("results/be9"),
+    solvers=("openmc",),
+)
+```
+
+Prepared directories do not depend on the original in-memory `Case` and can be
+submitted later through a shell script, scheduler, or Python helper. There is
+no campaign object or shared mutable run state.
+
+## Energy groups
+
+Energy groups may be a canonical OpenMC structure name or explicit ascending
+boundaries in eV:
 
 ```python
 named_case = Case(
@@ -33,32 +101,57 @@ named_case = Case(
 
 custom_case = Case(
     ...,
-    energy_groups=LANL30_BOUNDS_EV,
+    energy_groups=(1.0e-5, 0.625, 20.0e6),
 )
 ```
 
-Named structures are validated and resolved lazily from
-`openmc.mgxs.GROUP_STRUCTURES`; this repository does not copy OpenMC's standard
-boundary tables. In both forms, `case.energy_bounds_ev` contains the resolved
-ascending numerical boundaries used by source integration, OpenSn, direct
-solutions, and result comparison.
-
-For OpenMC-only MGXS production, select only the OpenMC input:
+Named structures are resolved lazily from `openmc.mgxs.GROUP_STRUCTURES`; the
+repository does not copy OpenMC's standard tables. The custom `WIMS69`,
+`LANL30`, and `LANL70` definitions are available through `energy_bounds()` and
+are passed to `Case` as explicit boundaries:
 
 ```python
-run_path = prepare(
-    CASE,
-    Path("results/material_001"),
-    solvers=("openmc",),
+from generate_mgxs import energy_bounds
+
+lanl70_case = Case(
+    ...,
+    energy_groups=energy_bounds("LANL70"),
 )
 ```
 
-The managed cylindrical form consists only of ordered radial cell records, a
-finite axial height, boundary conditions, and an optional outer rectangular
-prism. Each cell declares its XSdata name explicitly, so two cells may share a
-physical material without sharing an MGXS dataset:
+In every case, `case.energy_bounds_ev` contains the resolved ascending
+numerical boundaries used by source integration, OpenSn, direct solutions,
+and result comparison.
+
+## Materials and geometry
+
+Material composition is a sequence of explicit nuclides or natural elements:
 
 ```python
+be9 = Material("be9", "Be-9", 1.85, (("Be9", 1.0),))
+iron = Material("iron", "natural iron", 7.87, (("Fe", 1.0),))
+steel = Material("steel", "Fe-C", 7.8, (("Fe", 0.98), ("C", 0.02)))
+uranium = Material(
+    "fuel",
+    "uranium",
+    18.823124,
+    (("U234", 2.5759e-6), ("U235", 3.4428e-4), ("U238", 4.7441e-2)),
+)
+```
+
+A mass number selects an explicit nuclide; a bare symbol delegates natural
+isotope expansion to OpenMC. Composition values are nonnegative relative atomic
+amounts. They need not sum to one and are passed unchanged to OpenMC with
+`percent_type="ao"`.
+
+The managed concentric geometry consists of ordered radial cells, a finite
+axial height, boundary conditions, and an optional surrounding rectangular
+prism. Every cell declares its logical XSdata name, so cells can share a
+physical material without aliasing their MGXS datasets:
+
+```python
+from generate_mgxs import ConcentricCell, ConcentricGeometry
+
 geometry = ConcentricGeometry(
     regions=(
         ConcentricCell("Inner", material_a, "inner", 1.0),
@@ -69,81 +162,85 @@ geometry = ConcentricGeometry(
 )
 ```
 
-Concentric cases must be prepared with `solvers=("openmc",)`; requesting an
-OpenSn input fails during preparation because OpenSn does not recreate this
-cylindrical CSG model.
+Concentric cases are OpenMC-only and must use `solvers=("openmc",)`. Generated
+OpenSn verification does not reproduce the concentric CSG geometry.
 
-The resulting directory contains `openmc/model.py` and `_metadata/run.json`,
-with no OpenSn directory. This is useful for large material libraries,
-parameter sweeps, external shell scripts, SLURM array jobs, and any workflow
-that only needs OpenMC MGXS production:
+## Run the generated workflow
 
-```python
-for case in cases:
-    run_path = prepare(
-        case,
-        results_root / case.name,
-        solvers=("openmc",),
-    )
-```
-
-Each directory is independently executable later. Set portable environment
-variables in the interactive shell, batch script, or SLURM job:
+Set runtime locations in the shell or scheduler environment:
 
 ```bash
 export OPENMC_CROSS_SECTIONS=/path/to/cross_sections.xml
 export OPENSN_CONSOLE=/path/to/opensn-console
-export OPENSN_MPIEXEC=/path/to/opensn-mpiexec  # only needed for MPI
 ```
 
-Material composition uses one simple sequence for explicit nuclides and
-natural elements:
-
-```python
-be9 = Material("be9", "Be-9", 1.85, (("Be9", 1.0),))
-iron = Material("iron", "natural iron", 7.87, (("Fe", 1.0),))
-steel = Material("steel", "Fe-C", 7.8, (("Fe", 0.98), ("C", 0.02)))
-uranium = Material(
-    "fuel", "uranium", 18.823124,
-    (("U234", 2.5759e-6), ("U235", 3.4428e-4), ("U238", 4.7441e-2)),
-)
-```
-
-A mass number selects an explicit nuclide; a bare symbol delegates natural
-isotope expansion to OpenMC. The package carries no periodic-table or natural-
-abundance database. Composition values are nonnegative relative atomic amounts;
-they need not sum to one and are passed unchanged to OpenMC with `percent_type="ao"`.
-
-For `run_dir=results/material_001`, the direct serial command contract is:
+Generated OpenMC input is directly executable:
 
 ```bash
-(cd "$run_dir/openmc" && python model.py run)
-(cd "$run_dir/openmc" && python model.py process)
-"$OPENSN_CONSOLE" -i "$run_dir/opensn/input.py"
+cd results/be9/openmc
+python model.py run
+python model.py process
 ```
 
-The OpenMC commands need an OpenMC-capable Python environment and
-`OPENMC_CROSS_SECTIONS`. The processing command reads
-`openmc/statepoint.<batches>.h5` and produces `openmc/mgxs.h5`,
-`openmc/openmc_result.json`, and `diagnostics/mgxs_uncertainty.json`. OpenSn
-then reads the run-relative `openmc/mgxs.h5` and writes
-`opensn/opensn_result.json`. For two ranks, use:
+Run OpenSn separately from its generated directory:
 
 ```bash
-"$OPENSN_MPIEXEC" -n 2 "$OPENSN_CONSOLE" -i "$run_dir/opensn/input.py"
+cd results/be9/opensn
+"$OPENSN_CONSOLE" -i input.py
 ```
 
-Python execution helpers remain optional conveniences:
+The equivalent optional Python helpers are:
 
 ```python
 from generate_mgxs import run_openmc, run_opensn
 
-run_openmc(run_path, cross_sections="/path/to/cross_sections.xml")
-run_opensn(run_path, executable="/path/to/opensn-console")
+run_openmc(
+    run_path,
+    cross_sections="/path/to/cross_sections.xml",
+    operation="all",
+)
+run_opensn(
+    run_path,
+    executable="/path/to/opensn-console",
+)
 ```
 
-MGXS plotting is separate scientific postprocessing and does not execute a
-solver or read an OpenMC statepoint:
+For MPI OpenSn execution, supply both `ranks` and `mpi_executable` to
+`run_opensn()`, or invoke the installed MPI wrapper manually.
+
+## Run-directory products
+
+A completed two-solver run normally contains:
+
+```text
+run/
+├── _metadata/run.json
+├── diagnostics/mgxs_uncertainty.json
+├── logs/
+│   ├── openmc_run.stdout
+│   ├── openmc_run.stderr
+│   ├── openmc_process.stdout
+│   ├── openmc_process.stderr
+│   ├── opensn.stdout
+│   └── opensn.stderr
+├── openmc/
+│   ├── model.py
+│   ├── statepoint.<batches>.h5
+│   ├── mgxs.h5
+│   └── openmc_result.json
+└── opensn/
+    ├── input.py
+    └── opensn_result.json
+```
+
+`model.py process` reads the OpenMC statepoint and produces `mgxs.h5`, the
+compact OpenMC spectrum/result JSON, and the uncertainty diagnostics. OpenSn
+then reads the run-relative `openmc/mgxs.h5` and writes a result only after
+explicit convergence evidence is available.
+
+## Results and plotting
+
+Load one logical MGXS domain and generate all applicable plots:
 
 ```python
 from generate_mgxs import load_mgxs, plot_mgxs
@@ -156,44 +253,121 @@ figures = plot_mgxs(
 )
 ```
 
-The returned dictionary contains the applicable cross-section, chi,
-scattering-moment, and derived fission-production figures. Energy axes use the
-package's ascending-eV convention; plotting never requires OpenSn.
+Depending on fissionability, the returned figures include macroscopic
+cross-section curves, chi, scattering matrices, and a derived fission-production
+matrix. MGXS plots use logarithmic physical-energy axes where appropriate and
+include grids for readability.
 
-Complete, commented Be-9, homogeneous HDPE, UO2-in-HDPE, homogeneous FlatTop,
-detector, and Pu9+HDPE definitions are in `examples/`. The detector and
-Pu9+HDPE cases use the OpenMC-only concentric geometry. FlatTop uses
-`run_mode="eigenvalue"`; its direct comparison is:
+`plot_spectra()` compares only explicitly selected available solutions. Do not
+substitute dummy spectra for a solver that was not run:
 
 ```python
-direct = solve_infinite_medium_eigenvalue(mgxs)
-print(openmc_result.k_eff, direct.k_eff, opensn_result.k_eff)
+from generate_mgxs import load_openmc_result, load_opensn_result, plot_spectra
+
+openmc = load_openmc_result(run_path)
+opensn = load_opensn_result(run_path)
+plot_spectra(
+    openmc,
+    opensn.spectrum,
+    None,
+    include=("openmc", "opensn"),
+    output_directory=run_path / "plots",
+)
 ```
 
-Eigenvectors are compared through their independently normalized spectrum
-shapes; raw OpenMC tally values and uncertainty remain available on
-`openmc_result.spectrum`.
+For OpenMC multi-domain cases, use `load_openmc_domain_spectra()` and
+`plot_openmc_domain_spectra()` to compare independently normalized domain
+shapes in declared geometry order.
 
-Their run scripts use `OPENMC_CROSS_SECTIONS` and `OPENSN_CONSOLE`; no
-machine-specific path is embedded. The generated Python files are readable
-solver inputs, not wrappers around hidden configuration or in-memory `Case`
-objects. OpenMC MGXS HDF5 is the only supported cross-section handoff.
+Plotting is postprocessing only: it does not run a solver, process a statepoint,
+or regenerate MGXS data.
+
+## Direct-solver scope
+
+`solve_infinite_medium()` is a verification solve for non-fissionable,
+homogeneous fixed-source MGXS. `solve_infinite_medium_eigenvalue()` implements
+the corresponding homogeneous factorized-fission eigenvalue check. Neither is
+a general geometry solver.
+
+The direct eigenvalue solver currently requires a nonsingular full-group loss
+operator. The 30-group FlatTop result has two structurally disconnected zero
+groups, so its direct call remains visible but commented out in
+`examples/flattop/run.py`. OpenMC and OpenSn eigenvalue comparison remains
+active. Removing inactive groups and reconstructing their zero flux is a
+possible future extension, not current behavior.
+
+## Example runners
+
+The `examples/` directory contains complete case definitions and intentionally
+simple orchestration scripts:
+
+| Example | Geometry/mode | Active workflow |
+| --- | --- | --- |
+| `be9` | Homogeneous fixed source | OpenMC, direct, OpenSn, plots |
+| `hdpe` | Homogeneous fixed source | OpenMC, direct, OpenSn, plots |
+| `moderated` | LANL70 UO2 box inside an HDPE box | OpenMC, per-domain MGXS, OpenSn |
+| `flattop` | Homogeneous eigenvalue | OpenMC, OpenSn, plots; direct call commented out |
+| `detector` | Concentric fixed source | OpenMC-only, per-domain and all-domain plots |
+| `pu9_hdpe` | Concentric eigenvalue | OpenMC-only, per-domain plots |
+
+Each `run.py` is hand-maintained source, not generated code. The runners are
+deliberately fail-fast and easy to edit: an exception from a stage stops that
+script. `prepare()` generates only solver inputs and metadata inside the chosen
+run directory.
+
+Run an example from its own directory after setting the required environment:
+
+```bash
+cd examples/be9
+python run.py
+```
 
 ## OpenSn verification scope
 
-Generated OpenSn input is intentionally a verification calculation, not a
-second model of the OpenMC geometry. Each material domain in openmc/mgxs.h5
-is loaded and solved independently in a homogeneous, all-reflecting 2 cm cube
-with 2 cells per axis (8 cells total). The fixed
-GLCProductQuadrature3DXYZ(2, 4) supplies 8 directions, and P0 scattering is
-sufficient for the isotropic infinite-homogeneous scalar-flux comparison.
-Fixed-source cases use the existing steady-state source solver. A homogeneous
-eigenvalue case instead uses `PowerIterationKEigenSolver` with no external
-volumetric source and reports normalized flux shape, k-effective, power
-iterations, sweeps, balance, and final relative k change.
+Generated OpenSn input is a verification calculation, not a second model of the
+OpenMC geometry. Each material domain in `openmc/mgxs.h5` is loaded and solved
+independently in a homogeneous, all-reflecting 2 cm cube with two cells per axis
+(eight cells total). A fixed product quadrature supplies eight directions, and
+P0 scattering is used for the isotropic infinite-homogeneous scalar-flux check.
+
+Fixed-source cases use a steady-state source solver. Homogeneous eigenvalue
+cases use `PowerIterationKEigenSolver` with no external volumetric source and
+report normalized flux shape, k-effective, power iterations, sweeps, balance,
+and final relative k change.
 
 OpenMC target/moderator dimensions and boundary choices therefore do not
-control OpenSn cost. scattering_order remains a Case setting because it
-controls the MGXS moments produced by OpenMC; the OpenSn verifier deliberately
-uses only P0. The only case-specific OpenSn controls are GMRES tolerance,
-maximum iterations, and restart.
+control OpenSn cost. `scattering_order` remains a `Case` setting because it
+controls MGXS moments produced by OpenMC; the OpenSn verifier deliberately uses
+only P0. Case-specific OpenSn controls are GMRES tolerance, maximum iterations,
+restart, and the eigenvalue convergence controls.
+
+## Tests
+
+Most tests are fast and use generated fixtures or mocked subprocesses. The
+suite imports OpenMC to verify its named group structures, so run it from an
+OpenMC-capable Python environment. Run everything except the external-runtime
+execution module with:
+
+```bash
+python -m pytest --ignore=tests/test_execution.py
+```
+
+Run all tests with:
+
+```bash
+python -m pytest
+```
+
+The external-runtime paths used by `tests/test_execution.py` are configured by
+environment variables:
+
+```bash
+export OPENMC_PYTHON=/path/to/openmc/python  # defaults to the pytest interpreter
+export OPENMC_CROSS_SECTIONS=/path/to/cross_sections.xml
+export OPENSN_CONSOLE=/path/to/opensn-console
+export OPENSN_MPIEXEC=/path/to/opensn-mpiexec
+export OPENSN_FISSION_MGXS=/path/to/fissionable_fixture.h5
+```
+
+Tests skip when their required resources are not configured or unavailable.
+The production examples are not launched by the unit-test suite.
